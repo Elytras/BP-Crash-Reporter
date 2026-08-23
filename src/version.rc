@@ -1,0 +1,53 @@
+/*
+version.rc
+
+Identity metadata compiled into both binaries. An unsigned x64 PE with a small import table, no
+version resource and no company or product string scores badly with ML-based AV classifiers,
+because that is what packed malware looks like. Filling this in removes one of the cheap
+heuristics. It does not stop an injector looking like an injector; see the README.
+*/
+
+#include <winver.h>
+
+/*
+Both binaries compile this file, and two of the fields differ between them. A DLL that declares
+itself VFT_APP under the original filename "bpcrash.exe" is a mismatch a classifier can see, which
+would make this resource cost reputation rather than buy it -- the opposite of why it is here.
+CMake defines BPC_DLL on the library target.
+*/
+#ifdef BPC_DLL
+#  define BPC_FILETYPE VFT_DLL
+#  define BPC_ORIGNAME "bpcrash.dll"
+#else
+#  define BPC_FILETYPE VFT_APP
+#  define BPC_ORIGNAME "bpcrash.exe"
+#endif
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     1,0,0,0
+PRODUCTVERSION  1,0,0,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        BPC_FILETYPE
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "BPCrashHandler"
+            VALUE "FileDescription",  "Blueprint crash-stack tracer for Unreal Engine 4 games"
+            VALUE "FileVersion",      "1.0.0.0"
+            VALUE "InternalName",     "bpcrash"
+            VALUE "LegalCopyright",   "MIT licensed"
+            VALUE "OriginalFilename", BPC_ORIGNAME
+            VALUE "ProductName",      "BPCrashHandler"
+            VALUE "ProductVersion",   "1.0.0.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

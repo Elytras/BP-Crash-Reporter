@@ -1,0 +1,7 @@
+build/
+out/
+*.user
+.vs/
+bpcrash_*.txt
+build-noembed/
+bpcrash_live.dll
