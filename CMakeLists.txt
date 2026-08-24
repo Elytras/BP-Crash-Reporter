@@ -15,7 +15,16 @@ endif()
 
 # Static CRT everywhere. The machine this runs on is someone else's, and a missing VC redist
 # would be a support burden for a tool meant to be dropped next to a game and run.
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+#
+# CMAKE_MSVC_RUNTIME_LIBRARY only applies to an MSVC-ABI compiler (real MSVC, or clang-cl). The
+# Linux cross build uses clang in its GNU driver mode against the mingw-w64 sysroot instead (see
+# cmake/linux-mingw-clang.toolchain.cmake -- MSVC-cl mode cannot parse __try/__except the way
+# this codebase needs); there, the equivalent is linking libgcc/libstdc++/winpthread statically.
+if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+else()
+    add_link_options(-static -static-libgcc -static-libstdc++)
+endif()
 set(VCPKG_APPLOCAL_DEPS OFF)   # nothing here links a vcpkg DLL; stop the deploy step guessing
 
 # A PE that carries another PE in its resources, drops it, and loads it into a third process has
@@ -43,8 +52,19 @@ add_library(BPCrashHandler SHARED
     src/version.rc
     ${MINHOOK_SRC})
 set_target_properties(BPCrashHandler PROPERTIES OUTPUT_NAME "bpcrash")
+# The mingw/GNU toolchain's default shared-library prefix is "lib" (a Linux .so convention);
+# real Windows DLLs don't carry one, and the loader looks for an exact "bpcrash.dll" beside it.
+set_target_properties(BPCrashHandler PROPERTIES PREFIX "")
 target_include_directories(BPCrashHandler PRIVATE ${minhook_SOURCE_DIR}/include)
-target_compile_options(BPCrashHandler PRIVATE /EHa)   # __try/__except alongside C++ objects
+# __try/__except alongside C++ objects.
+if(MSVC)
+    target_compile_options(BPCrashHandler PRIVATE /EHa)
+else()
+    # -fasync-exceptions only on the files that actually use __try/__except -- applying it
+    # module-wide crashes clang's optimizer on this codebase (see the toolchain file).
+    set_source_files_properties(src/dll/DllMain.cpp src/dll/Dump.cpp src/dll/Symbols.cpp
+        PROPERTIES COMPILE_OPTIONS "-fasync-exceptions")
+endif()
 # PSAPI_VERSION=2 routes EnumProcessModules to kernel32, so the import table stays KERNEL32-only.
 target_compile_definitions(BPCrashHandler PRIVATE PSAPI_VERSION=2)
 # Picked up by version.rc as well as the C++: the DLL must not claim to be bpcrash.exe.
@@ -53,6 +73,11 @@ target_compile_definitions(BPCrashHandler PRIVATE BPC_DLL)
 add_executable(bpcrash src/loader/main.cpp src/version.rc)
 set_target_properties(bpcrash PROPERTIES OUTPUT_NAME "bpcrash")
 add_dependencies(bpcrash BPCrashHandler)
+# wmain (here and in hostload) needs mingw's wide-entry console CRT stub; without -municode the
+# linker reaches for WinMain instead and fails. No-op / unrecognised on a real MSVC link.
+if(NOT MSVC)
+    target_link_options(bpcrash PRIVATE -municode -mconsole)
+endif()
 
 if(BPC_EMBED_DLL)
     # rc.exe finds `bpcrash.dll` through its include path, pointed at the DLL's output dir.
@@ -70,7 +95,14 @@ configure_file(bpcrash.cfg ${CMAKE_BINARY_DIR}/bpcrash.cfg COPYONLY)
 add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp)
 target_include_directories(selftest PRIVATE ${minhook_SOURCE_DIR}/include)
 target_compile_definitions(selftest PRIVATE PSAPI_VERSION=2)
-set_target_properties(selftest PROPERTIES LINK_FLAGS "/DEBUG")   # give it a PDB to find
+if(MSVC)
+    set_target_properties(selftest PROPERTIES LINK_FLAGS "/DEBUG")   # give it a PDB to find
+else()
+    set_source_files_properties(src/dll/Symbols.cpp PROPERTIES COMPILE_OPTIONS "-fasync-exceptions")
+endif()
 
 # Harness for "the DLL loaded but nothing happened" failures. Not part of the shipped set.
 add_executable(hostload tests/hostload.cpp)
+if(NOT MSVC)
+    target_link_options(hostload PRIVATE -municode -mconsole)
+endif()
