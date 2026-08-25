@@ -9,26 +9,85 @@ There is no CLI, no overlay, no per-game rebuild and no generated SDK.
 
 ## Use
 
+Two files ship, and one of them is a text file with a single setting in it. The DLL travels inside
+the exe as a resource and both binaries link the CRT statically, so there is no redist to install
+and nothing else to copy.
+
 ```
 bpcrash.exe
 bpcrash.cfg     ->  process = FSD-Win64-Shipping.exe
 ```
 
-Run `bpcrash.exe`. It stages its embedded DLL beside itself as `bpcrash_live.dll`, then watches for
-the process and injects into it. Reports land in that same folder, named
-`bpcrash_<date>_<time>_<pid>_<seq>_t<tid>.txt`.
+### Windows, from scratch
 
-It keeps watching after that, so restarting the game re-injects without restarting the loader. Each
-process gets one attempt. Leave the window open for as long as you are playing, and close it or hit
-Ctrl+C when you are done.
+1. Get `bpcrash.exe` and `bpcrash.cfg` -- either build them (see [Build](#build)) or take them from
+   a release -- and put both in the same folder. They don't need to sit next to the game; the loader
+   finds the game by process name, not by folder.
+2. Open `bpcrash.cfg` in a text editor and set `process` to the game's exe name, e.g.
+   `process = FSD-Win64-Shipping.exe`. Task Manager's Details tab shows the exact name if you're not
+   sure.
+3. Run `bpcrash.exe`. It stages its embedded DLL beside itself as `bpcrash_live.dll`, prints a
+   "watching for ..." line, and then waits.
+4. Launch the game (or if it's already running, nothing extra -- the next launch is what gets
+   caught, since the loader only started watching just now). The console prints `Found pid ...,
+   injecting ...` followed by `Injected.` A few seconds after that, `bpcrash_status.txt` appears next
+   to the exe and fills in as startup proceeds; see the phases below for what a healthy run looks
+   like.
+5. Play. If the game crashes, a `bpcrash_<date>_<time>_<pid>_<seq>_t<tid>.txt` report lands in the
+   same folder as the DLL.
+6. Restarting the game re-injects automatically -- the loader keeps watching, so you don't need to
+   restart it too. Each process gets one attempt, whether it succeeded or failed. Leave the window
+   open for as long as you're playing, and close it or hit Ctrl+C when you're done.
 
-The injected file is a separate copy on purpose. LoadLibrary holds it locked for as long as the game
-runs, so injecting the build output directly would make the next compile fail until you close the
-game.
+The injected file is a separate copy (`bpcrash_live.dll`) on purpose. LoadLibrary holds it locked
+for as long as the game runs, so injecting the build output directly would make the next compile
+fail until you close the game.
 
-Two files ship, and one of them is a text file with a single setting in it. The DLL travels inside
-the exe as a resource and both binaries link the CRT statically, so there is no redist to install
-and nothing else to copy.
+If injection fails with `OpenProcess failed`, try running `bpcrash.exe` as administrator -- some
+anti-cheat or overlay software raises the target process's protection level.
+
+### Linux (Steam Play / Proton), from scratch
+
+`bpcrash.exe` runs fine under Wine, but it shouldn't be left *watching* under Wine: the Windows
+loader is designed to stay attached to the target forever, and while it's attached, wineserver --
+and with it Steam's own "is this game still running" tracking -- never lets go, even long after the
+game and its crash dialog have closed. `bpcrash-watch` (`linux/`) is the fix: a native Linux binary
+that polls `/proc` (touching Wine not at all) and only invokes `wine bpcrash.exe --once` for the
+moment injection actually takes, letting it disconnect immediately after.
+
+1. Get `bpcrash.exe`, `bpcrash.dll` and `bpcrash-watch` -- either build all three (see
+   [Build](#build)) or take them from a release.
+2. Set `process` in `bpcrash.cfg` (next to `bpcrash.exe`) to the game's `.exe` name, same as on
+   Windows -- e.g. `process = FSD-Win64-Shipping.exe`. This is the Windows exe name even though
+   you're on Linux; that's what shows up in the Proton process's own command line.
+3. Find the game's Proton prefix and `wine` binary:
+   - The prefix is `~/.local/share/Steam/steamapps/compatdata/<appid>/pfx` (or the equivalent path
+     under a different Steam library). The appid is in the game's Steam store URL.
+   - The `wine` binary is the one *that specific Proton build* ships, not your system Wine --
+     `<Proton install>/dist/bin/wine64` (older Proton) or `<Proton install>/files/bin/wine64`
+     (newer). Proton installs live under `~/.local/share/Steam/steamapps/common/Proton <version>/`.
+4. Run the watcher, with `WINEPREFIX` set to that prefix:
+   ```bash
+   WINEPREFIX=~/.local/share/Steam/steamapps/compatdata/<appid>/pfx \
+     ./bpcrash-watch <path-to-proton's-wine64> /path/to/bpcrash.exe
+   ```
+   It prints `bpcrash-watch -- watching /proc for ...` and returns to a prompt-free wait -- this
+   part touches only `/proc`, never Wine.
+5. Launch the game through Steam as normal. When `bpcrash-watch` sees the process appear, it
+   launches `wine bpcrash.exe --once` for you, prints `Found pid ..., running one-shot injection
+   ...` followed by `Done.`, and goes back to watching. `bpcrash_status.txt` and any crash reports
+   land next to `bpcrash.exe`, same as on Windows.
+6. Leave `bpcrash-watch` running for as long as you're playing; Ctrl+C when done. Because it's a
+   plain native process, it never holds wineserver open and never wedges Steam's "Running" state,
+   unlike leaving `bpcrash.exe` itself running under Wine would.
+
+`bpcrash.exe --once` also works stand-alone if you'd rather script your own watch loop: it injects
+into whatever matches right now (retrying for a few seconds if the process isn't up yet) and exits,
+instead of watching forever.
+
+### Status and reports
+
+Reports are named `bpcrash_<date>_<time>_<pid>_<seq>_t<tid>.txt` and land next to the DLL.
 
 `bpcrash_status.txt` records each startup phase as it completes, so you can answer "nothing
 happened" without a debugger:
@@ -200,18 +259,38 @@ folder and send a false-positive report to whichever vendor is blocking you.
 
 ## Build
 
+### On Windows
+
 ```bash
 cmake -B build -A x64 && cmake --build build --config Release
 ```
 
 MinHook is fetched by CMake, and there is nothing else to install.
 
-Windows x64 only, and CMake says so rather than letting you find out through missing headers. The
-resolution layer's contact with the OS is behind one API -- `src/dll/Platform.h`, six functions,
-implemented in `src/dll/Platform_Win32.cpp` -- so that part of a port is small, and
-`src/dll/Platform_Posix.cpp` marks the seam. The rest is not abstracted and is not close: the
-handler is a vectored exception handler, the symbol layer is dbghelp, the interceptor is MinHook
-detouring x86-64 prologues, and the loader injects with `CreateRemoteThread`.
+### Cross-compiled from Linux
+
+```bash
+sudo apt install g++ clang mingw-w64 cmake ninja-build   # Debian/Ubuntu
+
+cmake -B build-linux -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/linux-mingw-clang.toolchain.cmake
+cmake --build build-linux           # -> build-linux/bpcrash.exe, bpcrash.dll (real Windows PE, for Wine)
+
+g++ -O2 -std=c++20 -o bpcrash-watch linux/bpcrash-watch.cpp   # native Linux binary, outside CMake
+```
+
+The toolchain file sets `CMAKE_SYSTEM_NAME Windows`, which is what makes the `WIN32`-only check
+below pass on a Linux host: the CMake build's output is a real Windows PE pair, run under Wine, not
+a Linux binary. `bpcrash-watch` is built separately with a plain host compiler since it never links
+against anything Windows-shaped. Plain GCC mingw cannot build the CMake half of this codebase; see
+`cmake/linux-mingw-clang.toolchain.cmake`'s header comment for why clang is required.
+
+Windows only, natively -- CMake refuses a non-cross build on a non-Windows host outright, rather
+than letting you find out through missing headers. The resolution layer's contact with the OS is
+behind one API -- `src/dll/Platform.h`, six functions, implemented in `src/dll/Platform_Win32.cpp`
+-- so that part of a port is small, and `src/dll/Platform_Posix.cpp` marks the seam. The rest is not
+abstracted and is not close: the handler is a vectored exception handler, the symbol layer is
+dbghelp, the interceptor is MinHook detouring x86-64 prologues, and the loader injects with
+`CreateRemoteThread` -- all Win32-only, which is exactly what the mingw cross-compile still targets.
 
 The `selftest` target covers the hand-rolled decoders (pattern scanner, FName pool, opcode table)
 and the dbghelp path, without needing a game:

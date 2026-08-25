@@ -6,3 +6,4 @@ out/
 bpcrash_*.txt
 build-noembed/
 bpcrash_live.dll
+linux/bpcrash-watch

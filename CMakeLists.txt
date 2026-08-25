@@ -83,9 +83,20 @@ if(BPC_EMBED_DLL)
     # rc.exe finds `bpcrash.dll` through its include path, pointed at the DLL's output dir.
     target_sources(bpcrash PRIVATE src/loader/payload.rc)
     target_include_directories(bpcrash PRIVATE $<TARGET_FILE_DIR:BPCrashHandler>)
-    # rc.exe cannot see that the payload changed, so relink the exe whenever the DLL does.
+    # add_dependencies(bpcrash BPCrashHandler) above only orders BPCrashHandler before the *link*
+    # of bpcrash.exe; nothing stops Ninja scheduling the payload.rc compile (which needs
+    # bpcrash.dll to already exist, since rc.exe literally opens it to embed it) in parallel with,
+    # or before, BPCrashHandler's own build -- so a clean parallel build fails intermittently with
+    # rc.exe reporting "can't open file bpcrash.dll". OBJECT_DEPENDS fixes that, but only with a
+    # literal path: $<TARGET_FILE:BPCrashHandler> resolves fine elsewhere in this file (see the
+    # include directory above) but is never substituted when used in OBJECT_DEPENDS together with
+    # an RC source on this project's Ninja + windres combination -- it is emitted into build.ninja
+    # as the literal string "$<TARGET_FILE:BPCrashHandler>", which Ninja then reports as a
+    # permanently missing file with no rule to build it, failing every build, not just parallel
+    # ones. BPCrashHandler has no per-config output subdirectory here (single-config Ninja, no
+    # CMAKE_RUNTIME_OUTPUT_DIRECTORY override), so the literal path below is exact.
     set_source_files_properties(src/loader/payload.rc
-        PROPERTIES OBJECT_DEPENDS $<TARGET_FILE:BPCrashHandler>)
+        PROPERTIES OBJECT_DEPENDS "${CMAKE_BINARY_DIR}/bpcrash.dll")
 endif()
 
 # Everything ships as one folder: exe plus cfg.

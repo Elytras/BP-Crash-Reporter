@@ -9,6 +9,16 @@ It keeps running after the first injection so that restarting the game does not 
 the loader as well. Close the window, or Ctrl+C, when you are done.
 
 	bpcrash.cfg:  process = FSD-Win64-Shipping.exe
+
+--once injects into whatever matches right now (or within a few seconds) and exits immediately,
+instead of watching forever. Real Windows never needs this -- Steam-on-Windows does not infer
+"is this game still running" from this process's lifetime -- but under Proton, this loader is
+itself a Wine client, and wineserver (and so Steam's own running/relaunch tracking for that
+prefix) does not consider the session over while a client is still attached. A loader that
+watches forever therefore quietly wedges Steam's UI, even though the game and its crash dialog
+are long closed. --once exists so a Linux-native watcher (outside Wine entirely, so it never
+touches wineserver) can invoke this only for the moment injection actually takes, then let it
+disconnect, and do the "watch forever, re-inject on every relaunch" part itself instead.
 */
 
 #include <cstdio>
@@ -159,14 +169,23 @@ namespace
 
 int wmain(int argc, wchar_t** argv)
 {
+    // --once may appear anywhere; the first remaining argument, if any, is still the process-name
+    // override (the one-off case argv[1] always meant).
+    bool once = false;
+    std::wstring targetArg;
+    for (int i = 1; i < argc; ++i)
+    {
+        if (::_wcsicmp(argv[i], L"--once") == 0) once = true;
+        else if (targetArg.empty()) targetArg = argv[i];
+    }
+
     wchar_t self[MAX_PATH]{};
     ::GetModuleFileNameW(nullptr, self, MAX_PATH);
     const fs::path dir = fs::path(self).parent_path();
     const fs::path dll = dir / L"bpcrash.dll";        // the build output / shipped payload
     const fs::path live = dir / L"bpcrash_live.dll";  // the copy that actually gets injected
 
-    // argv[1] overrides the config file, for the one-off case.
-    std::string target = (argc > 1) ? fs::path(argv[1]).string() : ReadConfig(dir / "bpcrash.cfg", "process");
+    std::string target = !targetArg.empty() ? fs::path(targetArg).string() : ReadConfig(dir / "bpcrash.cfg", "process");
     if (target.empty())
     {
         std::printf("No target. Put `process = YourGame.exe` in bpcrash.cfg, or pass it as an argument.\n");
@@ -179,7 +198,7 @@ int wmain(int argc, wchar_t** argv)
     }
 
     const std::wstring wtarget = fs::path(target).wstring();
-    std::printf("BPCrashHandler -- watching for %s (Ctrl+C to stop) ...\n", target.c_str());
+    if (!once) std::printf("BPCrashHandler -- watching for %s (Ctrl+C to stop) ...\n", target.c_str());
 
     /*
     We stay alive and keep polling rather than exiting after the first injection, so that
@@ -187,9 +206,12 @@ int wmain(int argc, wchar_t** argv)
     pid we last acted on: a process only gets one attempt, whether it succeeded, failed, or was
     already injected, and a new pid is what triggers the next one. Retrying the same pid in a loop
     would only spin on a permissions or antivirus problem that another second will not fix.
+
+    --once still polls (the caller may invoke this right as the process appears, before it is
+    visible yet) but bounded to a few seconds, and returns instead of continuing to watch.
     */
     DWORD handled = 0;
-    for (;;)
+    for (int attempt = 0; !once || attempt < 25; ++attempt)
     {
         const DWORD pid = FindProcess(wtarget);
         if (!pid) handled = 0;   // gone; the next launch is a fresh target even if Windows reuses the pid
@@ -199,16 +221,20 @@ int wmain(int argc, wchar_t** argv)
             if (AlreadyInjected(pid, L"bpcrash_live.dll"))
             {
                 std::printf("Already loaded in pid %lu.\n", pid);
+                if (once) return 0;
             }
             else
             {
                 std::printf("Found pid %lu, injecting ...\n", pid);
-                std::printf(Inject(pid, live)
-                    ? "Injected. Reports will be written next to the DLL.\n"
-                    : "Injection failed. Waiting for the next launch.\n");
+                const bool ok = Inject(pid, live);
+                std::printf(ok ? "Injected. Reports will be written next to the DLL.\n"
+                                : "Injection failed. Waiting for the next launch.\n");
+                if (once) return ok ? 0 : 1;
             }
             std::printf("Watching for the next %s ...\n", target.c_str());
         }
-        ::Sleep(1000);
+        ::Sleep(once ? 200 : 1000);
     }
+    std::printf("--once: %s never appeared.\n", target.c_str());
+    return 1;
 }
