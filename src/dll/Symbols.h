@@ -51,6 +51,19 @@ namespace bpc::sym
     // Pick up modules injected after Init. Cheap enough to call once per crash.
     void Refresh();
 
+    /*
+    Drop dbghelp's symbols for every module except the main one, releasing the file handles it
+    holds on their PDBs.
+
+    dbghelp keeps a PDB mapped for as long as the module is in its session, so after one report
+    has named a frame in an injected DLL, that DLL's PDB stays locked for the life of the process
+    - and a PDB under active development is one the linker is about to rewrite (LNK1201). Nothing
+    is lost by dropping them: Refresh() re-registers on the next crash and SYMOPT_DEFERRED_LOADS
+    means the reload costs nothing until a frame actually lands there. The main module is kept
+    because it is the one deliberately warmed at load time, and nobody is relinking the game.
+    */
+    void ReleaseInjected();
+
     // Every loaded module, one "name  base  size" line each, into the dump.
     void ForEachModule(void (*fn)(const char* name, const void* base, size_t size, void* ctx), void* ctx);
 }

@@ -560,6 +560,12 @@ namespace
 
             __try { DumpBlueprint(); }
             __except (EXCEPTION_EXECUTE_HANDLER) { Add("<blueprint pass faulted>\n"); }
+
+            /* Give back the PDBs of everything but the game itself, now that the report has had
+               its use of them - otherwise an injected mod DLL's PDB stays locked and its next
+               build fails to link. See sym::ReleaseInjected. */
+            __try { sym::ReleaseInjected(); }
+            __except (EXCEPTION_EXECUTE_HANDLER) { }
         }
         __except (EXCEPTION_EXECUTE_HANDLER) { }
         CloseReport();

@@ -256,6 +256,17 @@ bool bpc::sym::Resolve(const void* addr, char* out, size_t cap)
     return true;
 }
 
+void bpc::sym::ReleaseInjected()
+{
+    if (!g_ready || !p_SymUnloadModule64) return;
+    const auto keep = reinterpret_cast<DWORD64>(bpc::plat::ModuleBase());
+    ForEachModule([](const char*, const void* base, size_t, void* ctx)
+    {
+        const auto b = reinterpret_cast<DWORD64>(base);
+        if (b != *static_cast<const DWORD64*>(ctx)) p_SymUnloadModule64(Self(), b);
+    }, const_cast<DWORD64*>(&keep));
+}
+
 void bpc::sym::ForEachModule(void (*fn)(const char*, const void*, size_t, void*), void* ctx)
 {
     HMODULE mods[512];
