@@ -17,6 +17,7 @@ name pool is enough to catch that.
 #include "../src/dll/Platform.h"
 #include "../src/dll/Symbols.h"
 #include "../src/dll/Ue.h"
+#include "../src/loader/Triage.h"
 
 using namespace bpc;
 
@@ -193,6 +194,41 @@ namespace
     }
 }
 
+namespace
+{
+    // The log reading behind the load triage, on a dump as DRG writes it (CL-135784).
+    void TestTriage()
+    {
+        const std::string e = "[2026.03.17-19.10.56:756][497]LogStreaming: Error: ";
+        const std::vector<std::string> lines{ "noise", e + "****DumpDependencies [Dependencies]:",
+            e + "    Export 4 /Game/M/WBP_Child.WBP_Child_C:Setup",
+            e + "    Linker is ../../../FSD/Content/M/WBP_Child.uasset",
+            e + "        Dep S_BEFORE_S Import    43   /Game/P/WBP_Base.WBP_Base_C:Setup",
+            e + "Missing Dependency, request for /Game/P/WBP_Base.WBP_Base_C:Setup but it hasn't been created yet." };
+        triage::Dump d;
+        CHECK(triage::LastDump(lines, d));
+        CHECK(d.line == 1 && d.after == 0);
+        CHECK(d.exportPath == "/Game/M/WBP_Child.WBP_Child_C:Setup");
+        CHECK(d.linker == "../../../FSD/Content/M/WBP_Child.uasset");
+        CHECK(d.missing.size() == 1 && d.missing[0] == "/Game/P/WBP_Base.WBP_Base_C:Setup");
+
+        std::string super, created;
+        CHECK(triage::FatalNames("Fatal error: [File:Unknown] [Line: 3159] Could not find SuperStruct Setup to create Setup",
+                                 super, created));
+        CHECK(super == "Setup" && created == "Setup");
+        CHECK(triage::Matches(d, super, created));
+        CHECK(!triage::Matches(d, "ReceiveTick", "ReceiveTick"));
+        CHECK(!triage::FatalNames("Assertion failed: x", super, created));
+
+        CHECK(triage::PackageOf(d.linker, "FSD") == "/Game/M/WBP_Child");
+        CHECK(triage::PackageOf(d.missing[0], "FSD") == "/Game/P/WBP_Base");
+
+        std::vector<std::string> none{ "a", "b" };
+        CHECK(!triage::LastDump(none, d));
+        std::printf("triage ok\n");
+    }
+}
+
 int main()
 {
     TestNames();
@@ -200,6 +236,7 @@ int main()
     TestBytecode();
     TestSymbols();
     TestSections();
+    TestTriage();
     if (g_fails) { std::printf("%d CHECK(s) FAILED\n", g_fails); return 1; }
     std::printf("all ok\n");
     return 0;

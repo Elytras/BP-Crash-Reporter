@@ -70,7 +70,7 @@ target_compile_definitions(BPCrashHandler PRIVATE PSAPI_VERSION=2)
 # Picked up by version.rc as well as the C++: the DLL must not claim to be bpcrash.exe.
 target_compile_definitions(BPCrashHandler PRIVATE BPC_DLL)
 
-add_executable(bpcrash src/loader/main.cpp src/version.rc)
+add_executable(bpcrash src/loader/main.cpp src/loader/Triage.cpp src/version.rc)
 set_target_properties(bpcrash PROPERTIES OUTPUT_NAME "bpcrash")
 add_dependencies(bpcrash BPCrashHandler)
 # wmain (here and in hostload) needs mingw's wide-entry console CRT stub; without -municode the
@@ -103,7 +103,7 @@ endif()
 configure_file(bpcrash.cfg ${CMAKE_BINARY_DIR}/bpcrash.cfg COPYONLY)
 
 # The one runnable check. Pure decoders only, no game required.
-add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp)
+add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp src/loader/Triage.cpp)
 target_include_directories(selftest PRIVATE ${minhook_SOURCE_DIR}/include)
 target_compile_definitions(selftest PRIVATE PSAPI_VERSION=2)
 if(MSVC)

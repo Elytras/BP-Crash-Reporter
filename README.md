@@ -9,7 +9,7 @@ There is no CLI, no overlay, no per-game rebuild and no generated SDK.
 
 ## Use
 
-Two files ship, and one of them is a text file with a single setting in it. The DLL travels inside
+Two files ship, and one of them is a text file with one required setting in it. The DLL travels inside
 the exe as a resource and both binaries link the CRT statically, so there is no redist to install
 and nothing else to copy.
 
@@ -152,6 +152,48 @@ arguments rendered by type. That covers ints, floats, bools, names, strings, obj
 class and name, arrays with their contents, and four common structs (`FVector`, `FRotator`,
 `FVector2D`, `FLinearColor`).
 
+**Engine fatal errors.** A `check()` failure, a `Fatal` log line or a `LowLevelFatalError` is not a
+hardware fault: UE raises it as exception `0x4000` with the message attached. It gets a report like
+any crash, with the code shown as `UE_FATAL_ERROR` and the message on an `assert  :` line.
+
+**Load triage.** Some fatals happen while the game is loading a mod's Blueprint, not while running
+one, and then neither stack names the asset. The commonest is
+
+```
+Fatal error: [File:Unknown] [Line: 3159] Could not find SuperStruct ReceiveBeginPlay to create ReceiveBeginPlay
+```
+
+on `FAsyncLoadingThread`: a Blueprint was cooked against a different build of its parent class, or
+a pak replaced that parent. When the game it watched exits, `bpcrash.exe` appends a section to that
+crash's report naming the asset, the parent it could not find, and the `.pak` files holding each:
+
+```
+--- load triage (written by bpcrash.exe after the game exited) ---
+log     : ...\FSD\Saved\Logs\FSD.log  (last dependency dump at line 581, 0 line(s) before the end)
+creating: /Game/_MyMods/Turrets/BP_Turret.BP_Turret_C:ReceiveBeginPlay
+in file : ../../../FSD/Content/_MyMods/Turrets/BP_Turret.uasset
+missing : /Game/_MyMods/Base/BP_TurretBase.BP_TurretBase_C:ReceiveBeginPlay
+paks    : (searched ...\FSD\Content\Paks, ...\FSD\Mods)
+  /Game/_MyMods/Turrets/BP_Turret
+      ...\FSD\Content\Paks\Turrets_P.pak
+  /Game/_MyMods/Base/BP_TurretBase
+      ...\FSD\Content\Paks\TurretBase_P.pak
+verdict : ReceiveBeginPlay in /Game/_MyMods/Turrets/BP_Turret could not find its parent function ...
+```
+
+It reads the game's own log, which is why it runs after the exit: before failing, UE's async loader
+logs a `****DumpDependencies` block naming the export, its file and the missing object, but those
+lines reach `<Project>/Saved/Logs/<Project>.log` only on UE's own crash path, after the DLL's
+handler has run. The log path comes from the exe's (`<Project>/Binaries/<Platform>/<exe>`), so
+nothing here is per game. The verdict is given only when the log's last dump is the one the fatal
+names; any other crash gets one `no verdict:` line saying why.
+
+The paks searched are `<Project>/Content/Paks` and `<Project>/Mods`, all subfolders included, plus
+any folders in the cfg's optional `paks = <dir>;<dir>` line. A mod manager that merges every mod
+into one pak (MINT's `mods_P.pak`) makes that pak the answer; point `paks` at the per-mod files to
+name the mod. `bpcrash.exe --triage <report.txt> <path to the game exe>` runs the same triage on a
+report by hand, for `--once` and Linux, where nothing is watching when the game exits.
+
 ## Symbols
 
 The games ship no PDBs, but generated ones sit next to the exes; binfold writes a guessed-name PDB
@@ -252,6 +294,11 @@ folder and send a false-positive report to whichever vendor is blocking you.
   The offsets in `Ue.h` were checked against UE4.27. A UE5 build keeps `FName` unchanged but packs
   `FFieldVariant` into 8 bytes, which shifts every `FProperty` field down by 8, and widens `FVector`
   and `FRotator` to doubles. The offsets here do not apply to it.
+- **The load triage judges one fatal, and needs the log.** Only `Could not find SuperStruct` gets
+  a verdict. A launch that writes no log (DRG launched `-nullrhi -unattended` writes none) gets
+  `no verdict`, and so does a log that a relaunch rotated away before the loader saw the exit. Paks
+  with an encrypted index are skipped, and the pak list shows the disk as it is after the crash, not
+  as it was when the game mounted them.
 - **Symbol names are only as good as the PDB.** Generated PDBs carry public symbols with gaps, so
   dbghelp attributes an address to whatever symbol precedes it. Past a plausible function size the
   report leads with `module+RVA` and demotes the name to `(nearest: …)`, rather than asserting
