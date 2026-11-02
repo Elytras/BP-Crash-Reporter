@@ -102,10 +102,18 @@ namespace
     /* Pass 1, the native context. Nothing here dereferences a UObject, so it survives even a
        fully corrupt engine. */
 
+    /*
+    UE's own fatal errors (check(), UE_LOG Fatal, LowLevelFatalError) end in ReportAssert, which
+    raises this code with one argument: an FAssertInfo whose first field is the message, in both
+    4.27 and 5.x. It is the only way an engine fatal reaches a vectored handler.
+    */
+    constexpr DWORD kUeAssert = 0x4000;
+
     const char* ExceptionName(DWORD code)
     {
         switch (code)
         {
+        case kUeAssert:                          return "UE_FATAL_ERROR";
         case EXCEPTION_ACCESS_VIOLATION:         return "ACCESS_VIOLATION";
         case EXCEPTION_STACK_OVERFLOW:           return "STACK_OVERFLOW";
         case EXCEPTION_ILLEGAL_INSTRUCTION:      return "ILLEGAL_INSTRUCTION";
@@ -137,6 +145,22 @@ namespace
             const ULONG_PTR kind = er->ExceptionInformation[0];
             Add("access  : %s at 0x%p\n",
                 kind <= 8 ? kOp[kind] : "?", reinterpret_cast<void*>(er->ExceptionInformation[1]));
+        }
+        /* The message on one line, ASCII only. bpcrash.exe reads this line back after the game
+           exits to match it against the log (see src/loader/Triage.cpp). */
+        if (er->ExceptionCode == kUeAssert && er->NumberParameters >= 1)
+        {
+            const auto* info = reinterpret_cast<const wchar_t* const*>(er->ExceptionInformation[0]);
+            const wchar_t* msg = plat::BadRead(info, 8) ? nullptr : *info;
+            if (msg && !plat::BadRead(msg, 2))
+            {
+                char line[1024];
+                size_t n = 0;
+                for (; n + 1 < sizeof(line) && !plat::BadRead(msg + n, 2) && msg[n]; ++n)
+                    line[n] = (msg[n] >= 0x20 && msg[n] < 0x80) ? static_cast<char>(msg[n]) : ' ';
+                line[n] = 0;
+                Add("assert  : %s\n", line);
+            }
         }
 
         const auto rip = static_cast<uintptr_t>(cx->Rip);
@@ -537,6 +561,7 @@ namespace
         case EXCEPTION_IN_PAGE_ERROR:
         case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
         case EXCEPTION_NONCONTINUABLE_EXCEPTION:
+        case kUeAssert:
             return true;
         default:
             // C++ EH (0xE06D7363), debugger events, SetThreadName and friends are not crashes.

@@ -19,17 +19,30 @@ watches forever therefore quietly wedges Steam's UI, even though the game and it
 are long closed. --once exists so a Linux-native watcher (outside Wine entirely, so it never
 touches wineserver) can invoke this only for the moment injection actually takes, then let it
 disconnect, and do the "watch forever, re-inject on every relaunch" part itself instead.
+
+When a watched process exits, the loader appends a load triage to the crash report it left (see
+Triage.h): for an async-load fatal, the asset, its missing parent and the paks holding each. That
+needs the game gone, so --once, which has left by then, does not do it;
+
+	bpcrash.exe --triage <report.txt> <path to the game exe>
+
+does the same by hand.
+
+	bpcrash.cfg:  paks = D:\more\paks;E:\other    (optional) folders searched besides the game's own
 */
 
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
+#include <vector>
 #include <windows.h>
 
 #include <tlhelp32.h>
 
 #include "resource.h"
+#include "Triage.h"
 
 namespace fs = std::filesystem;
 
@@ -83,7 +96,7 @@ namespace
         return s.substr(a, s.find_last_not_of(ws) - a + 1);
     }
 
-    // `key = value`, plus `#` and `//` comments. One key exists, so there is no parser here.
+    // `key = value`, plus `#` and `//` comments.
     std::string ReadConfig(const fs::path& file, const std::string& key)
     {
         std::ifstream in(file);
@@ -115,6 +128,16 @@ namespace
         }
         ::CloseHandle(snap);
         return pid;
+    }
+
+    // `paks = a;b` from the cfg.
+    std::vector<fs::path> ExtraPaks(const fs::path& cfg)
+    {
+        std::vector<fs::path> out;
+        std::stringstream in(ReadConfig(cfg, "paks"));
+        for (std::string one; std::getline(in, one, ';'); )
+            if (!(one = Trim(one)).empty()) out.emplace_back(one);
+        return out;
     }
 
     bool AlreadyInjected(DWORD pid, const std::wstring& dllName)
@@ -175,6 +198,15 @@ int wmain(int argc, wchar_t** argv)
     std::wstring targetArg;
     for (int i = 1; i < argc; ++i)
     {
+        if (::_wcsicmp(argv[i], L"--triage") == 0 && i + 2 < argc)
+        {
+            wchar_t self[MAX_PATH]{};
+            ::GetModuleFileNameW(nullptr, self, MAX_PATH);
+            const bool ok = bpc::triage::AppendTo(argv[i + 1], argv[i + 2],
+                                                  ExtraPaks(fs::path(self).parent_path() / "bpcrash.cfg"));
+            std::printf(ok ? "Triage appended to %ls\n" : "Could not write %ls\n", argv[i + 1]);
+            return ok ? 0 : 1;
+        }
         if (::_wcsicmp(argv[i], L"--once") == 0) once = true;
         else if (targetArg.empty()) targetArg = argv[i];
     }
@@ -211,13 +243,31 @@ int wmain(int argc, wchar_t** argv)
     visible yet) but bounded to a few seconds, and returns instead of continuing to watch.
     */
     DWORD handled = 0;
+    HANDLE watched = nullptr;   // the handled process, kept to see it exit and triage its crash
+    fs::path watchedExe;
     for (int attempt = 0; !once || attempt < 25; ++attempt)
     {
+        if (watched && ::WaitForSingleObject(watched, 0) == WAIT_OBJECT_0)
+        {
+            const fs::path report = bpc::triage::AppendToReport(::GetProcessId(watched), dir, watchedExe,
+                                                                ExtraPaks(dir / "bpcrash.cfg"));
+            if (!report.empty()) std::printf("Game exited; load triage appended to %ls\n", report.c_str());
+            ::CloseHandle(watched);
+            watched = nullptr;
+        }
+
         const DWORD pid = FindProcess(wtarget);
         if (!pid) handled = 0;   // gone; the next launch is a fresh target even if Windows reuses the pid
         else if (pid != handled)
         {
             handled = pid;
+            if (!once && !watched)
+            {
+                watched = ::OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                wchar_t exe[MAX_PATH]{};
+                DWORD len = MAX_PATH;
+                if (watched && ::QueryFullProcessImageNameW(watched, 0, exe, &len)) watchedExe = exe;
+            }
             if (AlreadyInjected(pid, L"bpcrash_live.dll"))
             {
                 std::printf("Already loaded in pid %lu.\n", pid);

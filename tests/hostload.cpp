@@ -7,10 +7,11 @@ thread reaches the end of its startup at all. There is no engine here, so Endpoi
 expected to fail its GObjects poll; what matters is that it still finishes, still arms, and still
 writes a report saying so.
 
-  hostload.exe <path-to-bpcrash.dll> [--crash|--overflow]
+  hostload.exe <path-to-bpcrash.dll> [--crash|--overflow|--assert [message]]
 
 --crash triggers an access violation afterwards and --overflow runs off the end of the stack, to
-exercise the handler itself. Either one shortens the wait, since the handler is armed first and
+exercise the handler itself. --assert raises a UE fatal error the way ReportAssert does (exception
+0x4000 carrying the message), then catches it and exits, as the engine's guarded thread would. Either one shortens the wait, since the handler is armed first and
 neither needs the engine.
 */
 
@@ -39,14 +40,18 @@ namespace
         Overflow(depth + 1);
     }
 #pragma optimize("", on)
+
+    // UE's FAssertInfo: the message first, in 4.27 and 5.x alike.
+    struct AssertInfo { const wchar_t* message; int framesToIgnore; };
 }
 
 int wmain(int argc, wchar_t** argv)
 {
-    if (argc < 2) { std::printf("usage: hostload <dll> [--crash|--overflow [--vm]]\n"); return 2; }
+    if (argc < 2) { std::printf("usage: hostload <dll> [--crash|--overflow [--vm]|--assert [message]]\n"); return 2; }
 
     const bool crash = argc > 2 && ::wcscmp(argv[2], L"--crash") == 0;
     const bool overflow = argc > 2 && ::wcscmp(argv[2], L"--overflow") == 0;
+    const bool assert_ = argc > 2 && ::wcscmp(argv[2], L"--assert") == 0;
 
     const DWORD t0 = ::GetTickCount();
     std::printf("loading %ls ...\n", argv[1]);
@@ -56,7 +61,7 @@ int wmain(int argc, wchar_t** argv)
     std::printf("mapped at %p after %lu ms\n", m, ::GetTickCount() - t0);
 
     // The worker runs on its own thread, so wait longer than Endpoint's own poll timeout.
-    const int seconds = (crash || overflow) ? 15 : 150;
+    const int seconds = (crash || overflow || assert_) ? 15 : 150;
     for (int i = 0; i < seconds; ++i)
     {
         ::Sleep(1000);
@@ -67,6 +72,14 @@ int wmain(int argc, wchar_t** argv)
     {
         std::printf("triggering an access violation\n");
         *reinterpret_cast<volatile int*>(0x1234) = 1;
+    }
+    if (assert_)
+    {
+        const AssertInfo info{ argc > 3 ? argv[3] : L"Fatal error: hostload --assert", 0 };
+        const ULONG_PTR args[] = { reinterpret_cast<ULONG_PTR>(&info) };
+        std::printf("raising a UE fatal error (0x4000)\n");
+        __try { ::RaiseException(0x4000, 0, 1, args); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ::ExitProcess(3); }
     }
     if (overflow)
     {
