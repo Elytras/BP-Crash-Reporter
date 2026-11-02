@@ -308,10 +308,20 @@ namespace bpc::triage
 
         const std::string& missing = d.missing.empty() ? std::string("?") : d.missing.front();
         const bool function = missing.find(':') != std::string::npos;   // Class_C:Function, not the class itself
-        out += "verdict : " + created + " in " + packages[0] + " could not find "
-             + (function ? "its parent function " + super + ", which the parent class as loaded does not have"
-                         : "its parent class " + super + ", which was not created (its package failed to load, or no longer holds it)")
-             + ".\n          Parent package: " + PackageOf(missing, project)
+        const std::string parent = PackageOf(missing, project);
+        out += "verdict : " + created + " in " + packages[0] + " could not find its parent "
+             + (function ? "function " : "class ") + super;
+
+        // A /Game parent that no searched pak holds was never installed: the child's mod depends on
+        // another mod that is missing, and no version mismatch is involved:
+        if (StartsWith(parent, "/Game/") && parent != packages[0] && found[parent].empty())
+            return out + ", because its parent package " + parent + "\n"
+                   "          is in none of the paks searched. Most likely the mod that ships " + packages[0] + "\n"
+                   "          needs another mod that is not installed (or is disabled): install that one, or remove the first.\n\n";
+
+        out += std::string(function ? ", which the parent class as loaded does not have"
+                                    : ", which was not created (its package failed to load, or no longer holds it)")
+             + ".\n          Parent package: " + parent
              + ". The two usually come from different builds: a Blueprint cooked against another version of its\n"
                "          parent, or a pak that replaced the parent. Update or remove the mod that ships the first package,\n"
                "          or the one that replaced the second (the paks above).\n\n";
