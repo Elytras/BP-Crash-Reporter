@@ -73,6 +73,25 @@ namespace
 
     template <class T> T Read(const uint8_t* p, int off) { return *reinterpret_cast<const T*>(p + off); }
 
+    /* Item i of the object array holds the object whose InternalIndex is i. Checked for items
+       1..5 at every plausible FUObjectItem stride with the Object* first (24 since UE4.21), so
+       the check does not assume a layout ProbeItemLayout has not measured yet. */
+    bool KnowsOwnIndices(const uint8_t* items)
+    {
+        for (int stride = 0x10; stride <= 0x38; stride += 8)
+        {
+            if (plat::BadRead(items, 6 * stride)) continue;
+            bool all = true;
+            for (int i = 1; i <= 5 && all; ++i)
+            {
+                auto* o = *reinterpret_cast<const UObject* const*>(items + i * stride);
+                all = !plat::BadRead(o, sizeof(UObject)) && o->Index == i;
+            }
+            if (all) return true;
+        }
+        return false;
+    }
+
     bool ValidChunked(const uint8_t* a, const ChunkedLayout& L)
     {
         if (plat::BadRead(a, 0x28)) return false;
@@ -96,7 +115,12 @@ namespace
         if (!chunks || plat::BadRead(chunks, numCh * sizeof(void*))) return false;
         for (int i = 0; i < numCh; ++i)
             if (!chunks[i] || plat::BadRead(chunks[i])) return false;
-        return true;
+
+        /* The shape above is not enough: the engine keeps other chunked arrays that pass every
+           test (one at DRG +0x6437EB8 won the scan while the real one was still filling, and the
+           ProcessInternal walk then crashed on its "objects"). Only the object array holds
+           objects that know their own slot, so require that as well. */
+        return KnowsOwnIndices(static_cast<const uint8_t*>(chunks[0]));
     }
 
     bool ValidFixed(const uint8_t* a, const FixedLayout& L)
@@ -269,7 +293,10 @@ namespace
         const int32_t n = endpoint::NumObjects();
         for (int32_t i = 0; i < n; ++i)
         {
+            /* Read-checked, unlike IsValid/IsA: this walk runs at startup over slots that may be
+               mid-construction, and a bad Class here is an access violation in our own thread. */
             UObject* o = endpoint::ObjectByIndex(i);
+            if (plat::BadRead(o, sizeof(UObject)) || plat::BadRead(o->Class, sizeof(UClass))) continue;
             if (!IsValid(o) || !IsA(o, CAST_UFunction)) continue;
             auto* fn = static_cast<UFunction*>(o);
             if (fn->FunctionFlags & FUNC_Native) continue;
