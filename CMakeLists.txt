@@ -32,12 +32,20 @@ set(VCPKG_APPLOCAL_DEPS OFF)   # nothing here links a vcpkg DLL; stop the deploy
 # file removes that one signal. The default stays ON because one file is nicer to hand out.
 option(BPC_EMBED_DLL "Embed the DLL in the loader exe" ON)
 
-# MinHook is the only dependency, and it is fetched rather than vendored.
+# External dependencies are pinned and fetched by CMake rather than vendored.
 include(FetchContent)
 FetchContent_Declare(minhook
     GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
     GIT_TAG        v1.3.3)
 FetchContent_MakeAvailable(minhook)
+
+# Standard, header-only JSON library for crash_context.json. Pin the archive by
+# SHA-256 so review builds use the same source, without adding a vendored parser.
+FetchContent_Declare(nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+    URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(nlohmann_json)
 
 # v1.3.3 ships no CMakeLists, so its five C files are compiled straight into the DLL.
 file(GLOB MINHOOK_SRC ${minhook_SOURCE_DIR}/src/*.c ${minhook_SOURCE_DIR}/src/hde/*.c)
@@ -70,9 +78,10 @@ target_compile_definitions(BPCrashHandler PRIVATE PSAPI_VERSION=2)
 # Picked up by version.rc as well as the C++: the DLL must not claim to be bpcrash.exe.
 target_compile_definitions(BPCrashHandler PRIVATE BPC_DLL)
 
-add_executable(bpcrash src/loader/main.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp src/loader/AnalysisIntegration.cpp src/version.rc)
+add_executable(bpcrash src/loader/main.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp src/version.rc)
 set_target_properties(bpcrash PROPERTIES OUTPUT_NAME "bpcrash")
 add_dependencies(bpcrash BPCrashHandler)
+target_link_libraries(bpcrash PRIVATE nlohmann_json::nlohmann_json)
 # wmain (here and in hostload) needs mingw's wide-entry console CRT stub; without -municode the
 # linker reaches for WinMain instead and fails. No-op / unrecognised on a real MSVC link.
 if(NOT MSVC)
@@ -103,8 +112,9 @@ endif()
 configure_file(bpcrash.cfg ${CMAKE_BINARY_DIR}/bpcrash.cfg COPYONLY)
 
 # The one runnable check. Pure decoders only, no game required.
-add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp src/loader/AnalysisIntegration.cpp)
+add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp)
 target_include_directories(selftest PRIVATE ${minhook_SOURCE_DIR}/include)
+target_link_libraries(selftest PRIVATE nlohmann_json::nlohmann_json)
 target_compile_definitions(selftest PRIVATE PSAPI_VERSION=2 "BPC_SELFTEST_FIXTURES=\"${CMAKE_SOURCE_DIR}/tests/fixtures\"")
 if(MSVC)
     set_target_properties(selftest PROPERTIES LINK_FLAGS "/DEBUG")   # give it a PDB to find

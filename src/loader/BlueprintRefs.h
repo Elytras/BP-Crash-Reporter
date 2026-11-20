@@ -25,16 +25,4 @@ std::vector<std::string> ClassPathCandidates(const std::vector<std::string>& pak
                                                std::string_view className,
                                                std::string_view project);
 
-struct SymbolEvidence {
-    bool functionName = false;
-    bool className = false;
-    bool complete = true; // false: stream incomplete / exceeded conservative scan cap
-};
-
-// Bounded ASCII and UTF-16LE literal-name scans; findings only establish name
-// presence, not whether a function is implemented, called or imported.
-SymbolEvidence SearchBytes(const std::vector<unsigned char>& bytes, const Failure& failure);
-SymbolEvidence SearchFile(const fs::path& pak, const Failure& failure,
-                          std::uint64_t maxBytes = 512ull * 1024 * 1024);
-
 } // namespace bpc::blueprint
