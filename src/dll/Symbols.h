@@ -6,9 +6,10 @@ Turns native addresses into names, for every module in the process. Used by Dump
 faulting instruction and the native call stack, and by Endpoint.cpp to look up
 ProcessLocalScriptFunction by name.
 
-The games ship no PDBs, but generated ones sit next to the exe (binfold writes a guessed-name PDB
-from a matched database). Those do not carry the exe's CodeView signature, so dbghelp refuses them
-unless `SYMOPT_LOAD_ANYTHING` is set.
+The main module's PDB comes from a symstore-layout cache beside this DLL (filled by a mod manager
+with the game's PDB for the exact build) or from <exe>.pdb (a generated one, from binfold). When the
+exe has a CodeView (RSDS) record, only a PDB whose GUID and age match it is loaded; see
+LoadMainModulePdb in Symbols.cpp.
 
 The scope is the whole process rather than just the game module. If another injected DLL is on the
 stack (a mod loader, an overlay, an anti-cheat, your own tooling) its frames get named from its own

@@ -196,18 +196,24 @@ report by hand, for `--once` and Linux, where nothing is watching when the game 
 
 ## Symbols
 
-The games ship no PDBs, but generated ones sit next to the exes; binfold writes a guessed-name PDB
-from a matched function database. Drop `<GameName>.pdb` beside `<GameName>.exe` and it is picked up.
+The main module's PDB is looked for in two places, in this order:
 
-Two settings make that work:
+1. **`symbols\<pdb>\<GUID><age>\<pdb>` beside `bpcrash.exe`**: a symstore-layout cache, keyed by the
+   exe's CodeView (RSDS) record. A mod manager drops the game's PDB for the exact build here; Mintfixed
+   does this for DRG. One folder per build, so release and experimental sit side by side.
+2. **`<GameName>.pdb` beside `<GameName>.exe`**: where a generated PDB lives (binfold writes a
+   guessed-name PDB from a matched function database).
 
-- **`SYMOPT_LOAD_ANYTHING`.** A shipping exe records a CodeView signature for the PDB it was built
-  with, and a generated PDB does not match it. Without this flag dbghelp rejects the file on that
-  mismatch.
-- **An explicit `SymLoadModuleExW` with the `.pdb` as the image name.** The module is unloaded and
-  reloaded by path rather than left to dbghelp's own lookup. The startup line reports whether that
-  worked (`PDB (loaded by explicit path)`) and what dbghelp ended up with for the main module, so
-  you can tell a loaded PDB from a silently absent one.
+When the exe carries an RSDS record (DRG's does), a PDB is loaded only if its GUID and age match it,
+and `SYMOPT_LOAD_ANYTHING` is switched off so dbghelp's own search cannot take a mismatched one
+either. A PDB left over from the previous game build would otherwise name every frame wrong. A
+skipped file is named on the startup line (`skipped ... (built for another exe)`) and frames fall
+back to module+RVA. An exe with no RSDS record has nothing to compare against, so `<GameName>.pdb`
+is loaded on trust with `SYMOPT_LOAD_ANYTHING`, as before.
+
+Either way the PDB is loaded with an explicit `SymLoadModuleExW`, the `.pdb` as the image name,
+bound to the module's real base. The startup line says which file it loaded and what dbghelp ended
+up with for the main module, so you can tell a loaded PDB from a silently absent one.
 
 The search path is set explicitly to the exe's directory plus the DLL's, and does *not* inherit
 `_NT_SYMBOL_PATH`, which usually names a symbol server; a network fetch inside a crash handler is

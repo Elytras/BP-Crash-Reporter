@@ -19,6 +19,7 @@ namespace
     using PFN_SymUnloadModule = BOOL    (WINAPI*)(HANDLE, DWORD64);
     using PFN_SymGetModInfoW  = BOOL    (WINAPI*)(HANDLE, DWORD64, PIMAGEHLP_MODULEW64);
     using PFN_SymFromName     = BOOL    (WINAPI*)(HANDLE, PCSTR, PSYMBOL_INFO);
+    using PFN_SymSrvIndexW    = BOOL    (WINAPI*)(PCWSTR, PSYMSRV_INDEX_INFOW, DWORD);
 
     PFN_SymSetOptions    p_SymSetOptions = nullptr;
     PFN_SymInitializeW   p_SymInitializeW = nullptr;
@@ -28,36 +29,103 @@ namespace
     PFN_SymUnloadModule  p_SymUnloadModule64 = nullptr;
     PFN_SymGetModInfoW   p_SymGetModuleInfoW64 = nullptr;
     PFN_SymFromName      p_SymFromName = nullptr;
+    PFN_SymSrvIndexW     p_SymSrvGetFileIndexInfoW = nullptr;
 
     bool g_ready = false;
-    char g_status[256] = "symbols: not initialised";
+    char g_status[1024] = "symbols: not initialised";
 
     HANDLE Self() { return ::GetCurrentProcess(); }
 
-    /*
-    Points dbghelp at <exe>.pdb by hand, which is what makes a generated PDB usable at all.
+    /* LOAD_ANYTHING is for a generated PDB beside an exe with no CodeView record, which dbghelp
+       would otherwise reject. LoadMainModulePdb drops it again when the exe has one. */
+    constexpr DWORD kSymOptions = SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_ANYTHING |
+                                  SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS;
 
-    A shipping UE build has its CodeView debug directory stripped, so the binary carries no PDB
-    name and dbghelp has nothing to look for; it will not guess one from the exe's filename.
-    SYMOPT_LOAD_ANYTHING does not help here, since it relaxes the signature check rather than the
-    absence of a name. Passing the .pdb itself as SymLoadModuleExW's ImageName skips the lookup
-    entirely and binds those symbols to the module's real base.
-    */
-    bool LoadMainModulePdb()
+    bool SameIndex(const SYMSRV_INDEX_INFOW& a, const SYMSRV_INDEX_INFOW& b)
     {
-        if (!p_SymLoadModuleExW) return false;
+        return ::memcmp(&a.guid, &b.guid, sizeof(GUID)) == 0 && a.age == b.age;
+    }
 
-        wchar_t pdb[MAX_PATH]{};
-        ::GetModuleFileNameW(nullptr, pdb, MAX_PATH);
-        wchar_t* dot = ::wcsrchr(pdb, L'.');
-        if (!dot) return false;
-        ::wcscpy_s(dot, MAX_PATH - (dot - pdb), L".pdb");
-        if (::GetFileAttributesW(pdb) == INVALID_FILE_ATTRIBUTES) return false;
+    /*
+    Picks the main module's PDB and loads it by hand. Returns the path it loaded, or null, and
+    leaves a note in `why` for the status line when it skipped one.
 
-        const auto base = reinterpret_cast<DWORD64>(bpc::plat::ModuleBase());
-        if (p_SymUnloadModule64) p_SymUnloadModule64(Self(), base);   // drop the symbol-less entry
-        return p_SymLoadModuleExW(Self(), nullptr, pdb, nullptr, base,
-                                  static_cast<DWORD>(bpc::plat::ModuleSize()), nullptr, 0) != 0;
+    Two places, in this order:
+      1. <this DLL's dir>\symbols\<pdb>\<GUID><age>\<pdb> -- a symstore-layout cache, keyed by the
+         exe's own CodeView (RSDS) record. A mod manager fills it with the game's official PDB
+         for the exact build, so release and experimental can sit side by side.
+      2. <exe>.pdb beside the exe -- where a generated (binfold) PDB lives.
+
+    When the exe carries an RSDS record (DRG's does), a candidate is loaded only if its GUID and
+    age match it. A PDB left from the previous game build would otherwise name every frame wrong,
+    and SYMOPT_LOAD_ANYTHING would let it. With no RSDS record there is nothing to compare, and
+    <exe>.pdb is taken on trust as before.
+
+    Passing the .pdb itself as SymLoadModuleExW's ImageName skips dbghelp's own lookup and binds
+    those symbols to the module's real base.
+    */
+    const wchar_t* LoadMainModulePdb(char* why, size_t whyCap)
+    {
+        static wchar_t chosen[MAX_PATH];
+        if (!p_SymLoadModuleExW) return nullptr;
+
+        wchar_t exe[MAX_PATH]{};
+        ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+
+        SYMSRV_INDEX_INFOW want{};
+        want.sizeofstruct = sizeof(want);
+        const bool hasIndex = p_SymSrvGetFileIndexInfoW &&
+                              p_SymSrvGetFileIndexInfoW(exe, &want, 0) && want.pdbfile[0];
+
+        /* With a record to match against, dbghelp's own check is the right one: without this, its
+           fallback search would still take a stale <exe>.pdb that we skipped below. */
+        if (hasIndex) p_SymSetOptions(kSymOptions & ~SYMOPT_LOAD_ANYTHING);
+
+        wchar_t cands[2][MAX_PATH]{};
+        if (hasIndex)
+        {
+            wchar_t dir[MAX_PATH]{};
+            HMODULE self = nullptr;
+            ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                 reinterpret_cast<LPCWSTR>(&LoadMainModulePdb), &self);
+            ::GetModuleFileNameW(self, dir, MAX_PATH);
+            if (wchar_t* s = ::wcsrchr(dir, L'\\')) *s = 0;
+            const wchar_t* slash = ::wcsrchr(want.pdbfile, L'\\');   // RSDS may hold a full build path
+            const wchar_t* file = slash ? slash + 1 : want.pdbfile;
+            const GUID& g = want.guid;
+            ::_snwprintf_s(cands[0], _TRUNCATE, L"%s\\symbols\\%s\\%08X%04X%04X%02X%02X%02X%02X%02X%02X%02X%02X%X\\%s",
+                           dir, file, g.Data1, g.Data2, g.Data3, g.Data4[0], g.Data4[1], g.Data4[2],
+                           g.Data4[3], g.Data4[4], g.Data4[5], g.Data4[6], g.Data4[7], want.age, file);
+        }
+        ::wcscpy_s(cands[1], exe);
+        wchar_t* dot = ::wcsrchr(cands[1], L'.');
+        if (dot) ::wcscpy_s(dot, MAX_PATH - (dot - cands[1]), L".pdb");
+        else cands[1][0] = 0;
+
+        for (const wchar_t* pdb : cands)
+        {
+            if (!pdb[0] || ::GetFileAttributesW(pdb) == INVALID_FILE_ATTRIBUTES) continue;
+            if (hasIndex)
+            {
+                SYMSRV_INDEX_INFOW got{};
+                got.sizeofstruct = sizeof(got);
+                if (!p_SymSrvGetFileIndexInfoW(pdb, &got, 0) || !SameIndex(want, got))
+                {
+                    const size_t used = ::strlen(why);
+                    ::_snprintf_s(why + used, whyCap - used, _TRUNCATE, "; skipped %ls (built for another exe)", pdb);
+                    continue;
+                }
+            }
+
+            const auto base = reinterpret_cast<DWORD64>(bpc::plat::ModuleBase());
+            if (p_SymUnloadModule64) p_SymUnloadModule64(Self(), base);   // drop the symbol-less entry
+            if (p_SymLoadModuleExW(Self(), nullptr, pdb, nullptr, base,
+                                   static_cast<DWORD>(bpc::plat::ModuleSize()), nullptr, 0) == 0)
+                continue;
+            ::wcscpy_s(chosen, pdb);
+            return chosen;
+        }
+        return nullptr;
     }
 
     // What dbghelp ended up with for a module, so the status line reports it rather than guesses.
@@ -136,6 +204,7 @@ bool bpc::sym::Init()
     p_SymUnloadModule64    = reinterpret_cast<PFN_SymUnloadModule>(::GetProcAddress(dbg, "SymUnloadModule64"));
     p_SymGetModuleInfoW64  = reinterpret_cast<PFN_SymGetModInfoW>(::GetProcAddress(dbg, "SymGetModuleInfoW64"));
     p_SymFromName          = reinterpret_cast<PFN_SymFromName>(::GetProcAddress(dbg, "SymFromName"));
+    p_SymSrvGetFileIndexInfoW = reinterpret_cast<PFN_SymSrvIndexW>(::GetProcAddress(dbg, "SymSrvGetFileIndexInfoW"));
 
     if (!p_SymSetOptions || !p_SymInitializeW || !p_SymFromAddr)
     {
@@ -143,11 +212,7 @@ bool bpc::sym::Init()
         return false;
     }
 
-    /* LOAD_ANYTHING is the flag that matters here: the PDBs beside these game exes are generated
-       rather than shipped, so their signature does not match the binary and dbghelp would
-       otherwise reject them. */
-    p_SymSetOptions(SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_ANYTHING |
-                    SYMOPT_FAIL_CRITICAL_ERRORS | SYMOPT_NO_PROMPTS);
+    p_SymSetOptions(kSymOptions);
 
     /* We set the search path explicitly rather than take dbghelp's default, which inherits
        _NT_SYMBOL_PATH. On a machine used for reverse engineering that usually names a symbol
@@ -180,7 +245,8 @@ bool bpc::sym::Init()
     g_ready = true;
     Refresh();   // register the modules loaded so far, locally, with no server behind it
 
-    const bool byHand = LoadMainModulePdb();
+    char why[MAX_PATH + 64]{};
+    const wchar_t* pdb = LoadMainModulePdb(why, sizeof(why));
 
     /* Force the game module's symbols resident now. With deferred loading the first lookup would
        happen inside the crash handler, parsing tens of MB through a heap that is a prime suspect
@@ -188,9 +254,9 @@ bool bpc::sym::Init()
     char probe[512];
     Resolve(plat::ModuleBase() + 0x1000, probe, sizeof(probe));
 
-    ::sprintf_s(g_status, "symbols: ready -- main module: %s%s",
+    ::_snprintf_s(g_status, _TRUNCATE, "symbols: ready -- main module: %s%s%ls%s%s",
                 SymTypeName(reinterpret_cast<DWORD64>(plat::ModuleBase())),
-                byHand ? " (loaded by explicit path)" : "");
+                pdb ? " (loaded by explicit path: " : "", pdb ? pdb : L"", pdb ? ")" : "", why);
     return true;
 }
 
