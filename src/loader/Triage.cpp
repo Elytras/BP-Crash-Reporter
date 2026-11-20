@@ -88,10 +88,14 @@ namespace bpc::triage
             return true;
         }
 
-        std::vector<char> ReadAt(std::ifstream& f, int64_t offset, int64_t size)
+        std::vector<char> ReadAt(std::istream& f, int64_t offset, int64_t size)
         {
             // ponytail: one read of the whole index; a 4.27 base-game index is tens of MB at most.
             if (offset < 0 || size <= 0 || size > (int64_t(1) << 30)) return {};
+            f.clear();
+            f.seekg(0, std::ios::end);
+            const auto end = static_cast<std::streamoff>(f.tellg());
+            if (end < 0 || offset > end || size > end - offset) return {};
             std::vector<char> b(static_cast<size_t>(size));
             f.seekg(offset);
             f.read(b.data(), size);
@@ -167,10 +171,8 @@ namespace bpc::triage
     length-prefixed names inline in the primary index, and those are picked out by shape, as
     crash_triage.py does.
     */
-    std::vector<std::string> PakFiles(const fs::path& pak)
+    std::vector<std::string> PakFilesFromStream(std::istream& f)
     {
-        std::ifstream f(pak, std::ios::binary);
-        if (!f) return {};
         f.seekg(0, std::ios::end);
         const int64_t size = f.tellg();
         const int64_t tailAt = size > 300 ? size - 300 : 0;
@@ -232,6 +234,40 @@ namespace bpc::triage
             }
         }
         return out;
+    }
+
+    std::vector<std::string> PakFiles(const fs::path& pak)
+    {
+        std::ifstream f(pak, std::ios::binary);
+        return f ? PakFilesFromStream(f) : std::vector<std::string>{};
+    }
+
+    std::vector<std::string> PakFilesFromBytes(const std::vector<unsigned char>& bytes)
+    {
+        if (bytes.empty()) return {};
+        class MemoryBuffer final : public std::streambuf {
+        public:
+            explicit MemoryBuffer(const std::vector<unsigned char>& data) {
+                auto* p = reinterpret_cast<char*>(const_cast<unsigned char*>(data.data()));
+                setg(p, p, p + data.size());
+            }
+            pos_type seekoff(off_type off, std::ios_base::seekdir dir,
+                             std::ios_base::openmode mode) override {
+                if (!(mode & std::ios_base::in)) return pos_type(off_type(-1));
+                const auto length = static_cast<std::int64_t>(egptr() - eback());
+                const auto origin = dir == std::ios_base::beg ? std::int64_t(0) :
+                                    dir == std::ios_base::cur ? std::int64_t(gptr() - eback()) : length;
+                if (off < -origin || off > length - origin) return pos_type(off_type(-1));
+                const auto at = origin + off;
+                setg(eback(), eback() + at, egptr());
+                return pos_type(at);
+            }
+            pos_type seekpos(pos_type pos, std::ios_base::openmode mode) override {
+                return seekoff(static_cast<off_type>(pos), std::ios_base::beg, mode);
+            }
+        } buffer(bytes);
+        std::istream stream(&buffer);
+        return PakFilesFromStream(stream);
     }
 
     std::string Run(const std::string& assertMessage, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
@@ -328,7 +364,7 @@ namespace bpc::triage
         return out;
     }
 
-    bool AppendTo(const fs::path& report, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
+    bool AppendToRaw(const fs::path& report, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
     {
         std::string message;
         for (const auto& l : ReadLines(report))
@@ -343,7 +379,7 @@ namespace bpc::triage
     Load-time self-tests are skipped. Of the first-chance reports, the last one carrying a UE fatal message wins,
     since the engine's own crash path can fault again after it; failing that, the last one.
     */
-    fs::path AppendToReport(unsigned long pid, const fs::path& dir, const fs::path& gameExe,
+    fs::path AppendToReportRaw(unsigned long pid, const fs::path& dir, const fs::path& gameExe,
                             const std::vector<fs::path>& extraPaks)
     {
         const std::string tag = "_" + std::to_string(pid) + "_";

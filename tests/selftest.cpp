@@ -11,6 +11,12 @@ name pool is enough to catch that.
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "../src/dll/Bytecode.h"
 #include "../src/dll/NamePool.h"
@@ -18,6 +24,9 @@ name pool is enough to catch that.
 #include "../src/dll/Symbols.h"
 #include "../src/dll/Ue.h"
 #include "../src/loader/Triage.h"
+#include "../src/loader/AssetAnalysis.h"
+#include "../src/loader/MintfixedContext.h"
+#include "../src/loader/BlueprintRefs.h"
 
 using namespace bpc;
 
@@ -157,7 +166,7 @@ namespace
         if (ready)
         {
             sym::Resolve(here, out, sizeof(out));
-            CHECK(::strchr(out, 0x21) != nullptr);   // 0x21 = '!', the module/symbol separator
+            CHECK(::strchr(out, '!') != nullptr || ::strstr(out, " (nearest: ") != nullptr);   // 0x21 = '!', the module/symbol separator
         }
     }
 
@@ -229,14 +238,151 @@ namespace
     }
 }
 
+namespace {
+void TestMintfixedContext()
+{
+    namespace fs = std::filesystem;
+    const fs::path fixture = fs::path(BPC_SELFTEST_FIXTURES);
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path temp = fs::temp_directory_path() / ("bpcrash-mintfixed-selftest-" + std::to_string(unique));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); } } cleanup{temp};
+    try {
+        const fs::path bin = temp / "FSD" / "Binaries" / "Win64";
+        const fs::path paks = temp / "FSD" / "Content" / "Paks";
+        fs::create_directories(bin / "mintfixed-bpcrash");
+        fs::create_directories(paks);
+        const fs::path exe = bin / "FSD-Win64-Shipping.exe";
+        { std::ofstream file(exe); file << "dummy"; }
+        const fs::path local = temp / "local.pak";
+        const fs::path blob = temp / "extensionless-blob";
+        fs::copy_file(fixture / "mintfixed_sample.pak", local);
+        // Synthetic name-table strings outside the test PAK index. PAK metadata
+        // remains readable; this tests the scanner without needing the game.
+        { std::ofstream stream(local, std::ios::binary | std::ios::app);
+          const std::string marker = "Try Set Lit";
+          stream.put('\0'); stream.write(marker.data(), marker.size()); stream.put('\0'); }
+        fs::copy_file(fixture / "mintfixed_cache_blob.zip", blob);
+        fs::copy_file(local, paks / "mods_P.pak");
+
+        std::size_t seen = 0;
+        const auto zip = mintfixed::VisitZipPaks(blob, [&](const std::string& name, const std::vector<unsigned char>& bytes) {
+            CHECK(name == "mods/packed.pak");
+            CHECK(!bytes.empty());
+            CHECK(!triage::PakFilesFromBytes(bytes).empty());
+            ++seen;
+        });
+        CHECK(zip.pakEntries == 1 && zip.decoded == 1 && zip.skipped == 0 && seen == 1);
+
+        const auto jsonEscape = [](const fs::path& path) {
+            const auto chars = path.u8string();
+            std::string out;
+            for (auto c : chars) {
+                const char ch = static_cast<char>(c);
+                if (ch == '\\' || ch == '"') out.push_back('\\');
+                out.push_back(ch);
+            }
+            return out;
+        };
+        const fs::path context = bin / "mintfixed-bpcrash" / "crash_context.json";
+        {
+            std::ofstream out(context);
+            out << "{\"schema_version\":1,\"producer\":\"mintfixed\","
+                   "\"captured_after_successful_install\":true,\"generated_unix_ms\":100,"
+                   "\"installed_pak\":{\"path\":\"" << jsonEscape(paks / "mods_P.pak")
+                << "\",\"exists\":true,\"byte_size\":" << fs::file_size(paks / "mods_P.pak") << "},"
+                   "\"installed_mods\":["
+                   "{\"name\":\"Local Test Mod\",\"provider\":\"file\",\"integration_order\":0,"
+                   "\"archive\":{\"path\":\"" << jsonEscape(local) << "\",\"exists\":true,\"byte_size\":"
+                << fs::file_size(local) << "},\"archive_type\":\"pak_or_unknown\","
+                   "\"nested_paks_must_be_scanned\":false},"
+                   "{\"name\":\"Downloaded Test Mod\",\"provider\":\"modio\",\"integration_order\":1,"
+                   "\"archive\":{\"path\":\"" << jsonEscape(blob) << "\",\"exists\":true,\"byte_size\":"
+                << fs::file_size(blob) << "},\"archive_type\":\"zip\","
+                   "\"nested_paks_must_be_scanned\":true,\"modio_reference\":\"https://mod.io/g/drg/m/test\"}] }";
+        }
+        const auto loaded = mintfixed::Load(exe);
+        CHECK(loaded.present && loaded.valid && loaded.context.installedMods.size() == 2);
+        const fs::path report = temp / "sample-report.txt";
+        {
+            std::ofstream out(report);
+            out << "assert  : LowLevelFatalError Failed to find function Try Set Lit in WPN_DualMPs_C\n"
+                   "#0  /Game/WeaponsNTools/DualMachinePistols/WPN_DualMPs.WPN_DualMPs_C:ExecuteUbergraph\n";
+        }
+        CHECK(analysis::AppendTo(report, exe, {}));
+        CHECK(!analysis::AppendTo(report, exe, {}));
+        std::ifstream in(report);
+        const std::string result((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        CHECK(result.find("--- mintfixed mod attribution (bpcrash.exe) ---") != std::string::npos);
+        CHECK(result.find("Local Test Mod") != std::string::npos);
+        CHECK(result.find("Downloaded Test Mod") != std::string::npos);
+        CHECK(result.find("mods/packed.pak") != std::string::npos);
+        CHECK(result.find("integration_order: 1") != std::string::npos);
+        CHECK(result.find("result.assets_with_sources : 1/1") != std::string::npos);
+        CHECK(result.find("scan.paks.total") != std::string::npos);
+        CHECK(result.find("scan.nested_zip_paks") != std::string::npos);
+        CHECK(result.find("integrity.sha256          : not_revalidated") != std::string::npos);
+        CHECK(result.find("--- blueprint function compatibility (mintfixed) ---") != std::string::npos);
+        CHECK(result.find("failure.function          : Try Set Lit") != std::string::npos);
+        CHECK(result.find("symbols.function.mod_hits : 1") != std::string::npos);
+        CHECK(result.find("mod_evidence[1].missing_function    : present") != std::string::npos);
+        CHECK(result.find("class[1].evidence          : pak_index_filename") != std::string::npos);
+        CHECK(result.find("verification.causation    : not_established") != std::string::npos);
+
+        { std::ofstream out(context); out << "{\"schema_version\":2,\"producer\":\"mintfixed\"}"; }
+        CHECK(!mintfixed::Load(exe).valid);
+        std::printf("mintfixed context ok\n");
+    } catch (const std::exception& ex) {
+        std::printf("mintfixed context selftest error: %s\n", ex.what());
+        CHECK(false);
+    }
+}
+}
+
+namespace {
+void TestBlueprintRefs() {
+    const std::string fatal =
+        "assert  : Failed to find function Try Set Lit in PRJ_GrenadeLauncher_C /Game/Maps/SpaceRig\n"
+        "#0  /Game/WeaponsNTools/GrenadeLauncher/WPN_GrenadeLauncher.WPN_GrenadeLauncher_C:ExecuteUbergraph\n";
+    const auto parsed = blueprint::ParseFailure(fatal, "fsd");
+    CHECK(parsed.functionName == "Try Set Lit");
+    CHECK(parsed.targetClass == "PRJ_GrenadeLauncher_C");
+    CHECK(parsed.callerPackage == "fsd/content/weaponsntools/grenadelauncher/wpn_grenadelauncher");
+    CHECK(blueprint::ParseFailure("#0  /Game/A/B\n", "fsd").functionName.empty());
+    const auto paths = blueprint::ClassPathCandidates({
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uasset",
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uexp",
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher_OLD.uasset"},
+        parsed.targetClass, "fsd");
+    CHECK(paths.size() == 1);
+    CHECK(paths[0] == "fsd/content/weaponsntools/grenadelauncher/prj_grenadelauncher");
+    std::vector<unsigned char> bytes;
+    const auto appendWide = [&](const std::string& token) {
+        bytes.push_back(0);
+        for (auto c : token) { bytes.push_back(static_cast<unsigned char>(c)); bytes.push_back(0); }
+        bytes.push_back(0); bytes.push_back(0);
+    };
+    appendWide("Try Set Lit");
+    appendWide("PRJ_GrenadeLauncher_C");
+    const auto symbols = blueprint::SearchBytes(bytes, parsed);
+    CHECK(symbols.functionName && symbols.className && symbols.complete);
+    const std::string nearMiss = "XTry Set LitExtra PRJ_GrenadeLauncher_C_Old";
+    const std::vector<unsigned char> falsePositive(nearMiss.begin(), nearMiss.end());
+    const auto negative = blueprint::SearchBytes(falsePositive, parsed);
+    CHECK(!negative.functionName && !negative.className);
+    std::printf("blueprint refs ok\n");
+}
+}
+
 int main()
 {
+    TestBlueprintRefs();
     TestNames();
     TestPattern();
     TestBytecode();
     TestSymbols();
     TestSections();
     TestTriage();
+    TestMintfixedContext();
     if (g_fails) { std::printf("%d CHECK(s) FAILED\n", g_fails); return 1; }
     std::printf("all ok\n");
     return 0;
