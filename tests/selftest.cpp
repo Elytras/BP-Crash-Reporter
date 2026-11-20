@@ -329,8 +329,10 @@ void TestMintfixedContext()
         // reveal the precise ZIP member that supplied the class.
         CHECK(result.find(".zip_member       : mods/packed.pak") != std::string::npos);
         CHECK(result.find("Direct PAK") != std::string::npos);
-        CHECK(result.find("verification.pak_names    : mintfixed_manifest_v2_index") != std::string::npos);
-        CHECK(result.find("symbols.function.mod_hits : not_scanned_manifest_v2") != std::string::npos);
+        CHECK(result.find("verification.pak_names") == std::string::npos);
+        CHECK(result.find("symbols.function.mod_hits") == std::string::npos);
+        CHECK(result.find("target_class_name") == std::string::npos);
+        CHECK(result.find("integrity.archive_sha256") == std::string::npos);
         CHECK(result.find("fsd/content/maps/spacerig") == std::string::npos);
         CHECK(result.find("verification.causation    : not_established") != std::string::npos);
         CHECK(result.find("--- asset overlap analysis") == std::string::npos);
@@ -459,6 +461,13 @@ void TestBlueprintRefs() {
     CHECK(shared::PackageKey("OtherFSD/Content/Maps/Level.uasset", "fsd").empty());
     CHECK(shared::PackageKey("/Game/Maps/Game/LVL_Inside.LVL_Inside_C:Call", "fsd") ==
           "fsd/content/maps/game/lvl_inside");
+    // The vanilla PAK must be derived from the project name, not hard-coded to FSD.
+    const auto otherGame = std::filesystem::path("C:/Games/OtherProject/Binaries/Win64/Game.exe");
+    const auto vanilla = shared::VanillaPakPath(otherGame);
+    CHECK(vanilla.filename() == "OtherProject-WindowsNoEditor.pak");
+    CHECK(vanilla.parent_path().filename() == "Paks");
+    CHECK(vanilla.parent_path().parent_path().filename() == "Content");
+    CHECK(shared::VanillaPakPath("C:/Games/OtherProject/Invalid/Game.exe").empty());
     CHECK(blueprint::ParseFailure("#0  /Game/A/B\n", "fsd").functionName.empty());
     const auto paths = blueprint::ClassPathCandidates({
         "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uasset",

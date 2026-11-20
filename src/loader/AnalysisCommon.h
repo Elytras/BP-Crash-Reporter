@@ -28,6 +28,13 @@ inline std::string ProjectName(const fs::path& exe) {
     const auto dir = ProjectDir(exe);
     return dir.empty() ? std::string{} : Lower(PathUtf8(dir.filename()));
 }
+inline fs::path VanillaPakPath(const fs::path& exe) {
+    const auto projectDir = ProjectDir(exe);
+    if (projectDir.empty()) return {};
+    fs::path name = projectDir.filename();
+    name += "-WindowsNoEditor.pak";
+    return projectDir / "Content" / "Paks" / name;
+}
 inline std::vector<std::string> ReadLines(const fs::path& file) {
     std::ifstream in(file, std::ios::binary);
     std::vector<std::string> lines;

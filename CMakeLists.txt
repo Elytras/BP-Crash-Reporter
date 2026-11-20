@@ -115,7 +115,7 @@ configure_file(bpcrash.cfg ${CMAKE_BINARY_DIR}/bpcrash.cfg COPYONLY)
 add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp)
 target_include_directories(selftest PRIVATE ${minhook_SOURCE_DIR}/include)
 target_link_libraries(selftest PRIVATE nlohmann_json::nlohmann_json)
-target_compile_definitions(selftest PRIVATE PSAPI_VERSION=2 "BPC_SELFTEST_FIXTURES=\"${CMAKE_SOURCE_DIR}/tests/fixtures\"")
+target_compile_definitions(selftest PRIVATE PSAPI_VERSION=2)
 if(MSVC)
     set_target_properties(selftest PROPERTIES LINK_FLAGS "/DEBUG")   # give it a PDB to find
 else()

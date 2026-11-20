@@ -147,7 +147,7 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
     const bool missingFunction = !failure.functionName.empty();
     out << "context.path              : " << SafeText(PathUtf8(loaded.source), 1024) << "\n";
     out << "context.generated_unix_ms : " << context.generatedUnixMs << "\n";
-    out << "context.schema_version   : 2\n";
+    out << "context.schema_version   : " << context.schemaVersion << "\n";
     out << "context.installed_mods    : " << context.installedMods.size() << "\n";
     if (candidates.empty() && !missingFunction) {
         out << "scan.assets.detected      : 0\n";
@@ -162,9 +162,6 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
         // Empty member denotes a direct PAK, not a ZIP entry.
         std::map<std::string, std::set<std::string>> classPackages;
         bool ownsCallerPackage = false;
-        bool functionNameMention = false;
-        bool classNameMention = false;
-        bool incompleteScan = false;
     };
     std::map<std::uint64_t, BlueprintModEvidence> blueprintHits;
     std::map<std::string, std::string> vanillaClassCandidates;
@@ -203,7 +200,7 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
     if (missingFunction) {
         // FName generated class names usually map to an identically named .uasset.
         // Search the vanilla PAK index by filename, not the runtime /Engine/Transient path.
-        const auto vanilla = shared::ProjectDir(gameExe) / "Content" / "Paks" / "FSD-WindowsNoEditor.pak";
+        const auto vanilla = shared::VanillaPakPath(gameExe);
         std::error_code vanillaError;
         if (fs::is_regular_file(vanilla, vanillaError)) {
             for (const auto& key : blueprint::ClassPathCandidates(
@@ -216,7 +213,6 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
     out << "scan.archives.incomplete      : " << incomplete << "\n";
     out << "scan.nested_zip_paks          : " << nestedPaks << "\n";
     out << "scan.package_entries          : " << packageEntries << "\n";
-    out << "integrity.archive_sha256      : not_recorded\n";
     std::vector<std::pair<std::string, Candidate>> ordered(candidates.begin(), candidates.end());
     std::stable_sort(ordered.begin(), ordered.end(), [](const auto& a, const auto& b) {
         return a.second.weight > b.second.weight;
@@ -279,12 +275,10 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
     }
     out << "result.assets_with_sources : " << matchedAssets << "/" << ordered.size() << "\n";
     out << "result.source_pak_hits     : " << matchedPakSources << "\n";
-    out << "result.active_package_winner: not_determined\n";
     out << "result.snapshot_crash_match: installed_pak_size_and_mtime_match\n";
 
     if (missingFunction) {
         out << "\n--- blueprint function compatibility (mintfixed) ---\n";
-        out << "failure.type              : missing_blueprint_function\n";
         out << "failure.function          : " << SafeText(failure.functionName, 128) << "\n";
         out << "failure.target_class      : " << SafeText(failure.targetClass, 128) << "\n";
         out << "failure.caller_package    : "
@@ -326,23 +320,15 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
                 out << prefix << "evidence          : pak_index_filename\n";
             }
         }
-        out << "symbols.function.mod_hits : not_scanned_manifest_v2\n";
-        out << "symbols.class.mod_hits    : not_scanned_manifest_v2\n";
         out << "packages.caller.mod_hits  : " << callerMatches << "\n";
-        out << "symbols.scan_incomplete   : not_applicable_manifest_v2\n";
         std::size_t evidenceIndex = 0;
         for (const auto& [order, evidence] : blueprintHits) {
-            if (!evidence.mod || (!evidence.functionNameMention && !evidence.classNameMention &&
-                                  !evidence.ownsCallerPackage && evidence.classPackages.empty() &&
-                                  !evidence.incompleteScan)) continue;
+            if (!evidence.mod || (!evidence.ownsCallerPackage && evidence.classPackages.empty())) continue;
             const auto prefix = "mod_evidence[" + std::to_string(++evidenceIndex) + "].";
             out << prefix << "name                : " << SafeText(evidence.mod->name) << "\n";
             out << prefix << "integration_order   : " << order << "\n";
             out << prefix << "class_package_hits  : " << evidence.classPackages.size() << "\n";
-            out << prefix << "target_class_name   : not_scanned_manifest_v2\n";
-            out << prefix << "missing_function    : not_scanned_manifest_v2\n";
             out << prefix << "caller_package      : " << (evidence.ownsCallerPackage ? "present" : "not_detected") << "\n";
-            out << prefix << "scan               : manifest_index_only\n";
         }
         out << "mod_evidence.total        : " << evidenceIndex << "\n";
         std::set<std::uint64_t> callerOrders, classOrders;
@@ -362,10 +348,7 @@ std::string AnalyzeMintfixed(const mintfixed::LoadedContext& loaded,
             }
         }
         out << "cross_mod_pairs.detected  : " << crossModPairs << "\n";
-        out << "verification.pak_names    : mintfixed_manifest_v2_index\n";
-        out << "verification.bytecode     : not_parsed\n";
-        out << "verification.runtime_class: not_available\n";
-        out << "verification.active_winner: not_determined\n";
+        // Package-name matches are evidence of possible overlap, not proof of a cause.
         out << "verification.causation    : not_established\n";
     }
     return out.str();

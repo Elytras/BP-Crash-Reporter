@@ -209,34 +209,6 @@ namespace bpc::triage
         return f ? PakFilesFromStream(f) : std::vector<std::string>{};
     }
 
-    std::vector<std::string> PakFilesFromBytes(const std::vector<unsigned char>& bytes)
-    {
-        if (bytes.empty()) return {};
-        class MemoryBuffer final : public std::streambuf {
-        public:
-            explicit MemoryBuffer(const std::vector<unsigned char>& data) {
-                auto* p = reinterpret_cast<char*>(const_cast<unsigned char*>(data.data()));
-                setg(p, p, p + data.size());
-            }
-            pos_type seekoff(off_type off, std::ios_base::seekdir dir,
-                             std::ios_base::openmode mode) override {
-                if (!(mode & std::ios_base::in)) return pos_type(off_type(-1));
-                const auto length = static_cast<std::int64_t>(egptr() - eback());
-                const auto origin = dir == std::ios_base::beg ? std::int64_t(0) :
-                                    dir == std::ios_base::cur ? std::int64_t(gptr() - eback()) : length;
-                if (off < -origin || off > length - origin) return pos_type(off_type(-1));
-                const auto at = origin + off;
-                setg(eback(), eback() + at, egptr());
-                return pos_type(at);
-            }
-            pos_type seekpos(pos_type pos, std::ios_base::openmode mode) override {
-                return seekoff(static_cast<off_type>(pos), std::ios_base::beg, mode);
-            }
-        } buffer(bytes);
-        std::istream stream(&buffer);
-        return PakFilesFromStream(stream);
-    }
-
     std::string Run(const std::string& assertMessage, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
     {
         std::string out = "--- load triage (written by bpcrash.exe after the game exited) ---\n";

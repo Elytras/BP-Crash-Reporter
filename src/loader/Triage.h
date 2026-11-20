@@ -48,9 +48,6 @@ namespace bpc::triage
     // Every file in a pak, as "<project>/Content/...", lowercased. Empty if the index is encrypted or unreadable.
     std::vector<std::string> PakFiles(const fs::path& pak);
 
-    // Same index parser, without writing ZIP-contained PAKs to disk.
-    std::vector<std::string> PakFilesFromBytes(const std::vector<unsigned char>& bytes);
-
     // The report section for a crash with this assert message (empty if the crash was not a UE fatal).
     std::string Run(const std::string& assertMessage, const fs::path& gameExe, const std::vector<fs::path>& extraPaks);
 
