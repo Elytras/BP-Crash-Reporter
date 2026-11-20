@@ -318,7 +318,10 @@ folder and send a false-positive report to whichever vendor is blocking you.
 cmake -B build -A x64 && cmake --build build --config Release
 ```
 
-MinHook is fetched by CMake, and there is nothing else to install.
+MinHook and the header-only [nlohmann/json](https://github.com/nlohmann/json) v3.12.0
+library are fetched by CMake. The JSON release archive is SHA-256 pinned. An internet
+connection is needed on first configuration (or use a pre-populated CMake download cache).
+There is no separate JSON runtime DLL.
 
 ### Cross-compiled from Linux
 
@@ -356,6 +359,7 @@ cmake --build build --config Release --target selftest && build/Release/selftest
 
 MIT, see [LICENSE](LICENSE).
 
-- [MinHook](https://github.com/TsudaKageyu/minhook) (MIT), the only dependency, fetched by CMake.
+- [MinHook](https://github.com/TsudaKageyu/minhook) (MIT), fetched by CMake.
+- [nlohmann/json](https://github.com/nlohmann/json) v3.12.0 (MIT), header-only, fetched and SHA-256 pinned by CMake.
 - [Dumper-7](https://github.com/Encryqed/Dumper-7). The generic FNamePool, GObjects and
   ProcessEvent resolution techniques in `src/dll/Endpoint.cpp` are cut-down ports of its scanners.

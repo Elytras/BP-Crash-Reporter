@@ -1,4 +1,6 @@
 #include "Triage.h"
+#include "AssetAnalysis.h"
+#include "AnalysisCommon.h"
 
 #include <algorithm>
 #include <cctype>
@@ -13,12 +15,11 @@ namespace bpc::triage
 {
     namespace
     {
-        std::string Lower(std::string s)
-        {
-            for (char& c : s) c = static_cast<char>(::tolower(static_cast<unsigned char>(c)));
-            return s;
-        }
-
+        using shared::Lower;
+        using shared::StartsWith;
+        using shared::ProjectDir;
+        using shared::ReadLines;
+        using shared::ReadAt;
         // The last path component after '.' or ':': "/Game/A/B.B_C:Fn" -> "Fn".
         std::string_view Tail(std::string_view p)
         {
@@ -30,27 +31,6 @@ namespace bpc::triage
         {
             while (!s.empty() && (s[0] == ' ' || s[0] == '\t')) s.remove_prefix(1);
             return s;
-        }
-
-        bool StartsWith(std::string_view s, std::string_view p) { return s.substr(0, p.size()) == p; }
-
-        // <Root>/<Project>/Binaries/<Platform>/<Game>.exe -> <Root>/<Project>, or empty if not laid out so.
-        fs::path ProjectDir(const fs::path& exe)
-        {
-            const fs::path bin = exe.parent_path().parent_path();
-            return _wcsicmp(bin.filename().c_str(), L"Binaries") == 0 ? bin.parent_path() : fs::path();
-        }
-
-        std::vector<std::string> ReadLines(const fs::path& file)
-        {
-            std::vector<std::string> lines;
-            std::ifstream in(file, std::ios::binary);
-            for (std::string l; std::getline(in, l); )
-            {
-                if (!l.empty() && l.back() == '\r') l.pop_back();
-                lines.push_back(std::move(l));
-            }
-            return lines;
         }
 
         // A serialized FString: int32 length, then that many bytes (UTF-8/ANSI) or -length UTF-16 units.
@@ -88,15 +68,6 @@ namespace bpc::triage
             return true;
         }
 
-        std::vector<char> ReadAt(std::ifstream& f, int64_t offset, int64_t size)
-        {
-            // ponytail: one read of the whole index; a 4.27 base-game index is tens of MB at most.
-            if (offset < 0 || size <= 0 || size > (int64_t(1) << 30)) return {};
-            std::vector<char> b(static_cast<size_t>(size));
-            f.seekg(offset);
-            f.read(b.data(), size);
-            return f ? b : std::vector<char>{};
-        }
     }
 
     bool FatalNames(std::string_view message, std::string& super, std::string& created)
@@ -167,10 +138,8 @@ namespace bpc::triage
     length-prefixed names inline in the primary index, and those are picked out by shape, as
     crash_triage.py does.
     */
-    std::vector<std::string> PakFiles(const fs::path& pak)
+    std::vector<std::string> PakFilesFromStream(std::istream& f)
     {
-        std::ifstream f(pak, std::ios::binary);
-        if (!f) return {};
         f.seekg(0, std::ios::end);
         const int64_t size = f.tellg();
         const int64_t tailAt = size > 300 ? size - 300 : 0;
@@ -232,6 +201,12 @@ namespace bpc::triage
             }
         }
         return out;
+    }
+
+    std::vector<std::string> PakFiles(const fs::path& pak)
+    {
+        std::ifstream f(pak, std::ios::binary);
+        return f ? PakFilesFromStream(f) : std::vector<std::string>{};
     }
 
     std::string Run(const std::string& assertMessage, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
@@ -330,12 +305,26 @@ namespace bpc::triage
 
     bool AppendTo(const fs::path& report, const fs::path& gameExe, const std::vector<fs::path>& extraPaks)
     {
+        static constexpr std::string_view kLoadMarker =
+            "--- load triage (written by bpcrash.exe after the game exited) ---";
         std::string message;
-        for (const auto& l : ReadLines(report))
-            if (StartsWith(l, "assert  : ")) message = l.substr(10);
-        std::ofstream out(report, std::ios::binary | std::ios::app);
-        out << Run(message, gameExe, extraPaks);
-        return static_cast<bool>(out);
+        bool alreadyTriaged = false;
+        for (const auto& line : ReadLines(report)) {
+            if (StartsWith(line, "assert  : ")) message = line.substr(10);
+            if (StartsWith(line, kLoadMarker)) alreadyTriaged = true;
+        }
+        // The same report can be revisited by an explicit --triage invocation
+        // or a re-entering watcher. The original load triage is idempotent too,
+        // not merely the optional mod-analysis sections.
+        if (!alreadyTriaged) {
+            std::ofstream out(report, std::ios::binary | std::ios::app);
+            if (!out) return false;
+            out << Run(message, gameExe, extraPaks);
+            out.flush();
+            if (!out) return false;
+        }
+        (void)bpc::analysis::AppendTo(report, gameExe, extraPaks);
+        return true;
     }
 
     /*

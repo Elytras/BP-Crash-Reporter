@@ -11,6 +11,12 @@ name pool is enough to catch that.
 
 #include <cstdio>
 #include <cstring>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "../src/dll/Bytecode.h"
 #include "../src/dll/NamePool.h"
@@ -18,6 +24,12 @@ name pool is enough to catch that.
 #include "../src/dll/Symbols.h"
 #include "../src/dll/Ue.h"
 #include "../src/loader/Triage.h"
+#include "../src/loader/AssetAnalysis.h"
+#include "../src/loader/MintfixedContext.h"
+#include "../src/loader/FileModifiedUnixMs.h"
+#include "../src/loader/BlueprintRefs.h"
+#include "../src/loader/AnalysisCommon.h"
+#include <nlohmann/json.hpp>
 
 using namespace bpc;
 
@@ -141,24 +153,25 @@ namespace
 
         const bool ready = sym::Init();
         std::printf("symbols %s\n  status: %s\n", ready ? "ok" : "off", sym::Status());
+        // The selftest executable is built with /DEBUG and ships a PDB.
+        // Initialization failure is a test failure, not permission to skip
+        // the precise symbol-resolution assertion.
+        CHECK(ready);
 
-        // Any address inside a loaded module must resolve at least to module+RVA.
-        const void* here = reinterpret_cast<const void*>(&TestSymbols);
+        const void* here = reinterpret_cast<const void*>(&sym::Init);
         CHECK(sym::Resolve(here, out, sizeof(out)));
-        CHECK(::strstr(out, "selftest.exe") != nullptr);
-        std::printf("  self  : %s\n", out);
+        const std::string ownSymbol(out);
+        CHECK(ownSymbol.find("selftest.exe") != std::string::npos);
+        std::printf("  self  : %s\n", ownSymbol.c_str());
+        CHECK(ownSymbol.find('!') != std::string::npos);
+        CHECK(ownSymbol.find(" (nearest: ") == std::string::npos);
+        CHECK(ownSymbol.find("Init") != std::string::npos);
 
         const void* sleepFn = plat::ImportedFunction(L"kernel32.dll", "Sleep");
         CHECK(sym::Resolve(sleepFn, out, sizeof(out)));
         CHECK(::_strnicmp(out, "kernel32", 8) == 0);
         std::printf("  export: %s\n", out);
 
-        // This exe ships its own PDB, so we expect a real name here, not just module+RVA.
-        if (ready)
-        {
-            sym::Resolve(here, out, sizeof(out));
-            CHECK(::strchr(out, 0x21) != nullptr);   // 0x21 = '!', the module/symbol separator
-        }
     }
 
     /*
@@ -229,14 +242,254 @@ namespace
     }
 }
 
+namespace {
+void TestMintfixedContext()
+{
+    namespace fs = std::filesystem;
+    const auto unique = std::chrono::steady_clock::now().time_since_epoch().count();
+    const fs::path temp = fs::temp_directory_path() / ("bpcrash-mintfixed-v2-" + std::to_string(unique));
+    struct Cleanup { fs::path path; ~Cleanup() { std::error_code ec; fs::remove_all(path, ec); } } cleanup{temp};
+    try {
+        const fs::path bin = temp / "FSD" / "Binaries" / "Win64";
+        fs::create_directories(bin / "mintfixed-bpcrash");
+        const fs::path exe = bin / "FSD-Win64-Shipping.exe";
+        { std::ofstream out(exe); out << "test"; }
+        const auto jsonEscape = [](const fs::path& path) {
+            const auto chars = path.u8string();
+            std::string value;
+            for (auto c : chars) {
+                const auto ch = static_cast<char>(c);
+                if (ch == '\\' || ch == '"') value.push_back('\\');
+                value.push_back(ch);
+            }
+            return value;
+        };
+        const fs::path installed = temp / "FSD" / "Content" / "Paks" / "mods_P.pak";
+        fs::create_directories(installed.parent_path());
+        { std::ofstream out(installed, std::ios::binary); out << "sample merged PAK"; }
+        const auto testFingerprint = [&]() {
+            using nlohmann::json;
+            const auto ms = mintfixed::FileModifiedUnixMs(installed);
+            CHECK(ms.has_value());
+            return json{{"path", shared::PathUtf8(installed)}, {"exists", true},
+                        {"byte_size", fs::file_size(installed)}, {"modified_unix_ms", ms.value_or(0ULL)}};
+        };
+        const auto stampInstalledPak = [&](std::string data) {
+            auto json = nlohmann::json::parse(data);
+            json["installed_pak"] = testFingerprint();
+            for (auto& mod : json["installed_mods"]) {
+                if (!mod["archive"].contains("modified_unix_ms"))
+                    mod["archive"]["modified_unix_ms"] = nullptr;
+            }
+            return json.dump();
+        };
+        const fs::path context = bin / "mintfixed-bpcrash" / "crash_context.json";
+        // These source archives deliberately do not exist. v2 must rely ONLY
+        // on the installation snapshot, without reopening either source file.
+        {
+            std::ostringstream out;
+            out << R"({"schema_version":2,"producer":"mintfixed","captured_after_successful_install":true,"generated_unix_ms":123,"installed_pak":{"path":"merged","exists":true,"byte_size":42},"installed_mods":[)"
+                << "{\"name\":\"Direct PAK\",\"provider\":\"file\",\"integration_order\":0,\"archive\":{\"path\":\""
+                << jsonEscape(temp/"does-not-exist.pak")
+                << "\",\"exists\":false,\"byte_size\":0},\"archive_type\":\"pak_or_unknown\",\"archive_index\":{\"status\":\"complete\",\"paks\":[{\"member\":null,\"complete\":true,\"packages\":[\"../../../FSD/Content/WeaponsNTools/DualMachinePistols/WPN_DualMPs.uasset\"]}]}} ,"
+                << "{\"name\":\"Nested PAK\",\"provider\":\"modio\",\"integration_order\":1,\"archive\":{\"path\":\""
+                << jsonEscape(temp/"no-zip-needed")
+                << "\",\"exists\":false,\"byte_size\":0},\"archive_type\":\"zip\",\"modio_reference\":\"https://mod.io/g/drg/m/test\",\"archive_index\":{\"status\":\"complete\",\"paks\":[{\"member\":\"mods/packed.pak\",\"complete\":true,\"packages\":[\"../../../FSD/Content/WeaponsNTools/_Crosshairs/NewCrosshairs/HUD_CroNewGrenadeLauncher.uasset\"]}]}}]}";
+            std::ofstream manifestOut(context);
+            manifestOut << stampInstalledPak(out.str());
+        }
+        const auto loaded = mintfixed::Load(exe);
+        CHECK(loaded.valid && loaded.context.schemaVersion == 2);
+        CHECK(loaded.context.installedMods.size() == 2);
+        const fs::path report = temp / "crash.txt";
+        {
+            std::ofstream out(report);
+            out << "assert  : Failed to find function ChangeColorOfDot in HUD_CroNewGrenadeLauncher_C "
+                   "/Game/Maps/SpaceRig/LVL_SpaceRig.LVL_SpaceRig.PersistentLevel:HUD_CroNewGrenadeLauncher_C_123\n"
+                   "#0  /Game/WeaponsNTools/DualMachinePistols/WPN_DualMPs.WPN_DualMPs_C:ExecuteUbergraph\n";
+        }
+        CHECK(triage::AppendTo(report, exe, {}));
+        CHECK(triage::AppendTo(report, exe, {}));
+        std::ifstream in(report);
+        const std::string result((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        const auto count = [&](std::string_view marker) {
+            std::size_t occurrences = 0, at = 0;
+            while ((at = result.find(marker, at)) != std::string::npos) { ++occurrences; at += marker.size(); }
+            return occurrences;
+        };
+        CHECK(count("--- load triage (written by bpcrash.exe after the game exited) ---") == 1);
+        CHECK(count("--- mintfixed mod attribution (bpcrash.exe) ---") == 1);
+        CHECK(count("--- blueprint function compatibility (mintfixed) ---") == 1);
+        CHECK(result.find("context.schema_version   : 2") != std::string::npos);
+        CHECK(result.find("scan.source                   : mintfixed_manifest_v2") != std::string::npos);
+        CHECK(result.find("scan.archives.indexed         : 2") != std::string::npos);
+        CHECK(result.find("scan.nested_zip_paks          : 1") != std::string::npos);
+        CHECK(result.find("Nested PAK") != std::string::npos);
+        // A nested PAK used only as a Blueprint class candidate must still
+        // reveal the precise ZIP member that supplied the class.
+        CHECK(result.find(".zip_member       : mods/packed.pak") != std::string::npos);
+        CHECK(result.find("Direct PAK") != std::string::npos);
+        CHECK(result.find("verification.pak_names") == std::string::npos);
+        CHECK(result.find("symbols.function.mod_hits") == std::string::npos);
+        CHECK(result.find("target_class_name") == std::string::npos);
+        CHECK(result.find("integrity.archive_sha256") == std::string::npos);
+        CHECK(result.find("fsd/content/maps/spacerig") == std::string::npos);
+        CHECK(result.find("verification.causation    : not_established") != std::string::npos);
+        CHECK(result.find("--- asset overlap analysis") == std::string::npos);
+
+        // v1 must NOT be silently treated as indexed v2 data.
+        { std::ofstream out(context); out << R"({"schema_version":1,"producer":"mintfixed","captured_after_successful_install":true})"; }
+        CHECK(!mintfixed::Load(exe).valid);
+        // Incomplete indexes must not claim complete coverage.
+        { std::ofstream out(context); out << R"({"schema_version":2,"producer":"mintfixed","captured_after_successful_install":true,"generated_unix_ms":1,"installed_pak":{"path":"p","exists":true,"byte_size":1},"installed_mods":[{"name":"Bad","provider":"file","integration_order":0,"archive":{"path":"p","exists":true,"byte_size":1},"archive_type":"zip","archive_index":{"status":"complete","paks":[]}}]})"; }
+        CHECK(!mintfixed::Load(exe).valid);
+
+        // Use the library parser for JSON syntax/Unicode without weakening
+        // the existing strict schema, duplicate-key or resource-limit checks.
+        const std::string minimal = stampInstalledPak(R"({"schema_version":2,"producer":"mintfixed","captured_after_successful_install":true,"generated_unix_ms":9223372036854775808,"installed_pak":{"path":"merged","exists":true,"byte_size":42},"installed_mods":[]})");
+        const auto writeContext = [&](const std::string& bytes) {
+            std::ofstream out(context, std::ios::binary | std::ios::trunc);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        };
+        writeContext(minimal);
+        const auto minimalLoaded = mintfixed::Load(exe);
+        CHECK(minimalLoaded.valid);
+        CHECK(minimalLoaded.context.generatedUnixMs == 9223372036854775808ULL);
+
+        // Unicode escapes, including surrogate pairs, must be decoded correctly.
+        std::string withUnicode = minimal;
+        withUnicode.insert(withUnicode.size() - 1, R"(,"extra":"\uD83D\uDE80")");
+        writeContext(withUnicode);
+        CHECK(mintfixed::Load(exe).valid);
+
+        // Duplicate keys must fail, including keys in otherwise ignored data.
+        std::string duplicateKey = minimal;
+        duplicateKey.insert(duplicateKey.size() - 1, R"(,"extra":{"x":1,"x":2})");
+        writeContext(duplicateKey);
+        CHECK(!mintfixed::Load(exe).valid);
+
+        std::string invalidSurrogate = minimal;
+        invalidSurrogate.insert(invalidSurrogate.size() - 1, R"(,"extra":"\uD800")");
+        writeContext(invalidSurrogate);
+        CHECK(!mintfixed::Load(exe).valid);
+
+        std::string decimal = minimal;
+        decimal.insert(decimal.size() - 1, R"(,"extra":1.5)");
+        writeContext(decimal);
+        CHECK(!mintfixed::Load(exe).valid);
+
+        std::string rawNul = minimal;
+        rawNul.push_back('\0');
+        writeContext(rawNul);
+        CHECK(!mintfixed::Load(exe).valid);
+
+        std::string tooDeep = minimal;
+        tooDeep.insert(tooDeep.size() - 1, ",\"extra\":" + std::string(26, '[') + "0" + std::string(26, ']'));
+        writeContext(tooDeep);
+        CHECK(!mintfixed::Load(exe).valid);
+
+        // A missing source archive may have null byte size and mtime.
+        writeContext(minimal);
+        CHECK(mintfixed::Load(exe).valid);
+        auto missingArchive = nlohmann::json::parse(minimal);
+        missingArchive["installed_mods"] = nlohmann::json::array({
+            {{"name", "Missing"}, {"provider", "file"}, {"integration_order", 0},
+             {"archive", {{"path", "missing.pak"}, {"exists", false},
+                          {"byte_size", nullptr}, {"modified_unix_ms", nullptr}}},
+             {"archive_type", "missing"},
+             {"archive_index", {{"status", "unreadable"}, {"paks", nlohmann::json::array()}}}}
+        });
+        writeContext(missingArchive.dump());
+        CHECK(mintfixed::Load(exe).valid);
+        missingArchive["installed_mods"][0]["archive"]["exists"] = true;
+        writeContext(missingArchive.dump());
+        CHECK(!mintfixed::Load(exe).valid); // Existing archive cannot have null byte_size.
+
+        writeContext(minimal);
+        CHECK(mintfixed::Load(exe).valid);
+        { std::ofstream out(installed, std::ios::binary | std::ios::app); out << "changed"; }
+        const auto changed = mintfixed::Load(exe);
+        CHECK(!changed.valid && changed.stale);
+        CHECK(changed.error.find("mods_P.pak") != std::string::npos);
+        const fs::path staleReport = temp / "stale-crash.txt";
+        {
+            std::ofstream out(staleReport);
+            out << "assert  : Failed to find function ChangeColorOfDot in HUD_CroNewGrenadeLauncher_C\n";
+        }
+        CHECK(triage::AppendTo(staleReport, exe, {}));
+        std::ifstream staleInput(staleReport);
+        const std::string staleText((std::istreambuf_iterator<char>(staleInput)),
+                                    std::istreambuf_iterator<char>());
+        CHECK(staleText.find("status                  : stale_context") != std::string::npos);
+        CHECK(staleText.find("class.candidates") == std::string::npos);
+        CHECK(staleText.find("Nested PAK") == std::string::npos);
+        // Correct size but wrong mtime must also be rejected.
+        auto wrongTime = nlohmann::json::parse(stampInstalledPak(minimal));
+        wrongTime["installed_pak"]["modified_unix_ms"] =
+            wrongTime["installed_pak"]["modified_unix_ms"].get<std::uint64_t>() + 10000;
+        writeContext(wrongTime.dump());
+        CHECK(mintfixed::Load(exe).stale);
+        writeContext(stampInstalledPak(minimal));
+        CHECK(mintfixed::Load(exe).valid);
+        fs::remove(installed);
+        CHECK(mintfixed::Load(exe).stale); // Uninstall / missing merged PAK.
+
+        std::printf("mintfixed context ok\n");
+    } catch (const std::exception& ex) {
+        std::printf("mintfixed context selftest error: %s\n", ex.what());
+        CHECK(false);
+    }
+}
+}
+
+namespace {
+void TestBlueprintRefs() {
+    const std::string fatal =
+        "assert  : Failed to find function Try Set Lit in PRJ_GrenadeLauncher_C /Game/Maps/SpaceRig\n"
+        "#0  /Game/WeaponsNTools/GrenadeLauncher/WPN_GrenadeLauncher.WPN_GrenadeLauncher_C:ExecuteUbergraph\n";
+    const auto parsed = blueprint::ParseFailure(fatal, "fsd");
+    CHECK(parsed.functionName == "Try Set Lit");
+    CHECK(parsed.targetClass == "PRJ_GrenadeLauncher_C");
+    CHECK(parsed.callerPackage == "fsd/content/weaponsntools/grenadelauncher/wpn_grenadelauncher");
+    CHECK(shared::PackageKey("/Game/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.PRJ_GrenadeLauncher_C:OnImpact", "fsd") ==
+          shared::PackageKey("../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uasset", "fsd"));
+    CHECK(shared::PackageKey("/Engine/Transient.GameEngine_123", "fsd") == "engine/content/transient");
+    CHECK(shared::PackageKey("../../../FSD/Content/Maps/Game/LVL_Inside.umap", "fsd") ==
+          "fsd/content/maps/game/lvl_inside");
+    CHECK(shared::PackageKey("../../../FSD/Content/Maps/Engine/LVL_Inside.uasset", "fsd") ==
+          "fsd/content/maps/engine/lvl_inside");
+    CHECK(shared::PackageKey("OtherFSD/Content/Maps/Level.uasset", "fsd").empty());
+    CHECK(shared::PackageKey("/Game/Maps/Game/LVL_Inside.LVL_Inside_C:Call", "fsd") ==
+          "fsd/content/maps/game/lvl_inside");
+    // The vanilla PAK must be derived from the project name, not hard-coded to FSD.
+    const auto otherGame = std::filesystem::path("C:/Games/OtherProject/Binaries/Win64/Game.exe");
+    const auto vanilla = shared::VanillaPakPath(otherGame);
+    CHECK(vanilla.filename() == "OtherProject-WindowsNoEditor.pak");
+    CHECK(vanilla.parent_path().filename() == "Paks");
+    CHECK(vanilla.parent_path().parent_path().filename() == "Content");
+    CHECK(shared::VanillaPakPath("C:/Games/OtherProject/Invalid/Game.exe").empty());
+    CHECK(blueprint::ParseFailure("#0  /Game/A/B\n", "fsd").functionName.empty());
+    const auto paths = blueprint::ClassPathCandidates({
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uasset",
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher.uexp",
+        "../../../FSD/Content/WeaponsNTools/GrenadeLauncher/PRJ_GrenadeLauncher_OLD.uasset"},
+        parsed.targetClass, "fsd");
+    CHECK(paths.size() == 1);
+    CHECK(paths[0] == "fsd/content/weaponsntools/grenadelauncher/prj_grenadelauncher");
+    std::printf("blueprint refs ok\n");
+}
+}
+
 int main()
 {
+    TestBlueprintRefs();
     TestNames();
     TestPattern();
     TestBytecode();
     TestSymbols();
     TestSections();
     TestTriage();
+    TestMintfixedContext();
     if (g_fails) { std::printf("%d CHECK(s) FAILED\n", g_fails); return 1; }
     std::printf("all ok\n");
     return 0;
