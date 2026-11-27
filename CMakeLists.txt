@@ -111,7 +111,10 @@ endif()
 # Everything ships as one folder: exe plus cfg.
 configure_file(bpcrash.cfg ${CMAKE_BINARY_DIR}/bpcrash.cfg COPYONLY)
 
-# The one runnable check. Pure decoders only, no game required.
+# Portable report-selection regression checks; no game required.
+add_executable(report_selection_test tests/report_selection.cpp)
+
+# Pure decoders only, no game required.
 add_executable(selftest tests/selftest.cpp src/dll/Symbols.cpp src/dll/Platform_Win32.cpp src/loader/Triage.cpp src/loader/AssetAnalysis.cpp src/loader/MintfixedContext.cpp src/loader/BlueprintRefs.cpp)
 target_include_directories(selftest PRIVATE ${minhook_SOURCE_DIR}/include)
 target_link_libraries(selftest PRIVATE nlohmann_json::nlohmann_json)

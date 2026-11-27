@@ -137,6 +137,17 @@ Archive ParseArchive(const Json& value) {
     if (path.empty() || path.find('\0') != std::string::npos)
         throw std::runtime_error("invalid archive path");
     archive.path = fs::u8path(path);
+    // Accept the optional portable locator only for a POSIX absolute path
+    // naming the fixed merged PAK. Never resolve an arbitrary manifest path.
+    const auto relative = value.find("relative_path");
+    constexpr std::string_view suffix = "/Content/Paks/mods_P.pak";
+    if (relative != value.end() && relative->is_string() &&
+        relative->get<std::string>() == "Content/Paks/mods_P.pak" &&
+        path.size() >= suffix.size() && path.front() == '/' &&
+        (path.size() < 2 || path[1] != '/') &&
+        path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0) {
+        archive.portableInstalledPak = true;
+    }
     archive.exists = BoolField(value, "exists");
     const auto& byteSize = Field(value, "byte_size");
     if (byteSize.is_null()) {
@@ -195,7 +206,11 @@ bool MatchesInstalledPak(const Archive& recorded, const fs::path& gameExe) {
     if (project.empty() || !recorded.exists || !recorded.modifiedUnixMs) return false;
     const auto expected = project / "Content" / "Paks" / "mods_P.pak";
     std::error_code ec;
-    if (!fs::equivalent(expected, recorded.path, ec) || ec) return false;
+    if (!recorded.portableInstalledPak &&
+        (!fs::equivalent(expected, recorded.path, ec) || ec)) return false;
+    // Portable snapshots still validate the actual game-relative merged PAK,
+    // never a caller-selected path. Size and millisecond mtime remain strict.
+    ec.clear();
     const auto size = fs::file_size(expected, ec);
     if (ec || size != recorded.byteSize) return false;
     const auto milliseconds = FileModifiedUnixMs(expected);

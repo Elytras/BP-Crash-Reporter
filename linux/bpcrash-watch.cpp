@@ -41,6 +41,7 @@ bpcrash.exe, exactly as the Windows loader itself reads it.
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include "session-triage.h"
 
 namespace fs = std::filesystem;
 
@@ -129,6 +130,8 @@ namespace
 
 int main(int argc, char** argv)
 {
+    if (argc > 1 && std::string_view(argv[1]) == "--triage-only")
+        return bpc_session::Run(argc, argv);
     if (argc != 3)
     {
         std::printf("usage: bpcrash-watch <path-to-wine> <path-to-bpcrash.exe>\n"
