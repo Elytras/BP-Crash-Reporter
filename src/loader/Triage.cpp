@@ -1,6 +1,7 @@
 #include "Triage.h"
 #include "AssetAnalysis.h"
 #include "AnalysisCommon.h"
+#include "ReportSelection.h"
 
 #include <algorithm>
 #include <cctype>
@@ -335,29 +336,8 @@ namespace bpc::triage
     fs::path AppendToReport(unsigned long pid, const fs::path& dir, const fs::path& gameExe,
                             const std::vector<fs::path>& extraPaks)
     {
-        const std::string tag = "_" + std::to_string(pid) + "_";
-        std::vector<std::pair<int, fs::path>> reports;   // (seq, path)
         std::error_code ec;
-        for (const auto& e : fs::directory_iterator(dir, ec))
-        {
-            const std::string name = e.path().filename().string();
-            if (!StartsWith(name, "bpcrash_") || e.path().extension() != ".txt") continue;
-            const auto at = name.find(tag, 23);   // past "bpcrash_YYYYMMDD_HHMMSS"
-            if (at != 23) continue;
-            reports.emplace_back(std::atoi(name.c_str() + at + tag.size()), e.path());
-        }
-        std::sort(reports.begin(), reports.end());
-
-        fs::path pick, fatal;
-        for (const auto& [seq, path] : reports)
-        {
-            const auto lines = ReadLines(path);
-            if (lines.size() < 2 || !StartsWith(lines[1], "reason  : first-chance")) continue;
-            pick = path;
-            if (std::any_of(lines.begin(), lines.end(), [](const std::string& l) { return StartsWith(l, "assert  : "); }))
-                fatal = path;
-        }
-        if (!fatal.empty()) pick = fatal;
+        const auto pick = reports::Select(dir, std::to_string(pid), std::nullopt, ec);
         if (!pick.empty()) AppendTo(pick, gameExe, extraPaks);
         return pick;
     }

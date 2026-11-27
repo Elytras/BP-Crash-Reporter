@@ -14,6 +14,7 @@ struct Archive {
     bool exists = false;
     std::uint64_t byteSize = 0;
     std::optional<std::uint64_t> modifiedUnixMs;
+    bool portableInstalledPak = false;
 };
 
 struct IndexedPak {
